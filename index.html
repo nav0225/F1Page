@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sir Lewis Hamilton | 44</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Chakra+Petch:ital,wght@0,600;0,700;1,600;1,700&family=Inter:wght@300;400;500;600&display=swap"
+        rel="stylesheet">
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <!-- Navigation -->
+    <nav class="navbar reveal fade-down">
+        <div class="logo">LH<span>44</span></div>
+        <ul class="nav-links">
+            <li><a href="#stats">Legacy</a></li>
+            <li><a href="#gallery">Gallery</a></li>
+            <li><a href="#quote">Mindset</a></li>
+            <li>
+                <button id="theme-toggle" class="theme-toggle" aria-label="Toggle Dark/Light Mode">
+                    <i class="fas fa-moon"></i>
+                </button>
+            </li>
+            <li><a href="#cta" class="nav-btn">Join 44</a></li>
+        </ul>
+        <div class="hamburger">
+            <i class="fas fa-bars"></i>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section id="hero" class="hero">
+        <div class="video-container">
+            <canvas id="hero-canvas" class="hero-canvas"></canvas>
+            <div class="overlay"></div>
+        </div>
+
+        <div class="hero-content reveal fade-up">
+            <p class="hero-subtitle">7-Time Formula 1 World Champion</p>
+            <h1 class="hero-title">A DESIRE FOR<br><span class="accent-text">SPEED</span></h1>
+            <div class="scroll-indicator">
+                <span>Discover the Legacy</span>
+                <i class="fas fa-chevron-down"></i>
+            </div>
+        </div>
+    </section>
+
+    <!-- Stats Section -->
+    <section id="stats" class="stats-section">
+        <div class="container">
+            <div class="section-header reveal fade-up">
+                <h2>The <span class="accent-text">Legacy</span></h2>
+                <p>Redefining what is possible in motorsport.</p>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-card reveal fade-up" style="transition-delay: 0.1s;">
+                    <h3 class="stat-number">7</h3>
+                    <p class="stat-label">World Championships</p>
+                </div>
+                <div class="stat-card reveal fade-up" style="transition-delay: 0.2s;">
+                    <h3 class="stat-number">103+</h3>
+                    <p class="stat-label">Grand Prix Wins</p>
+                </div>
+                <div class="stat-card reveal fade-up" style="transition-delay: 0.3s;">
+                    <h3 class="stat-number">104+</h3>
+                    <p class="stat-label">Pole Positions</p>
+                </div>
+                <div class="stat-card reveal fade-up" style="transition-delay: 0.4s;">
+                    <h3 class="stat-number">197+</h3>
+                    <p class="stat-label">Podium Finishes</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Gallery/Showcase Section -->
+    <section id="gallery" class="gallery-section">
+        <div class="container">
+            <div class="section-header reveal fade-up">
+                <h2>Beyond the <span class="accent-text">Track</span></h2>
+                <p>Fashion, activism, and a global icon.</p>
+            </div>
+
+            <div class="gallery-grid">
+                <div class="gallery-item reveal fade-up">
+                    <img src="assets/helmet.jpg" alt="Lewis Hamilton Racing Helmet">
+                    <div class="item-overlay"><span>Speed</span></div>
+                </div>
+                <!-- Note: using generic f1/racing/fashion images for placeholders -->
+                <div class="gallery-item reveal fade-up">
+                    <img src="assets/track_wide.jpg" alt="Track Wide Shot">
+                    <div class="item-overlay"><span>Style</span></div>
+                </div>
+                <div class="gallery-item reveal fade-up">
+                    <img src="assets/steering_wheel.jpg" alt="Steering Wheel">
+                    <div class="item-overlay"><span>Purpose</span></div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Quote Section -->
+    <section id="quote" class="quote-section">
+        <div class="quote-container reveal zoom-in">
+            <i class="fas fa-quote-left quote-icon"></i>
+            <blockquote class="quote-text">
+                "What you do is not who you are. Who you are is how you do what you do."
+            </blockquote>
+            <p class="quote-author">- Sir Lewis Hamilton</p>
+        </div>
+    </section>
+
+    <!-- Call to Action Section -->
+    <section id="cta" class="cta-section">
+        <div class="container cta-content reveal fade-up">
+            <h2>Join the <span class="accent-purple">Movement</span></h2>
+            <p>Stay updated on the latest news, exclusive drops, and mission-driven initiatives.</p>
+            <form class="cta-form">
+                <input type="email" placeholder="Enter your email" required>
+                <button type="submit" class="btn-primary">Subscribe</button>
+            </form>
+            <div class="social-links">
+                <a href="#"><i class="fab fa-instagram"></i></a>
+                <a href="#"><i class="fab fa-twitter"></i></a>
+                <a href="#"><i class="fab fa-facebook-f"></i></a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="container footer-content">
+            <div class="logo">LH<span>44</span></div>
+            <p>&copy; 2026 Sir Lewis Hamilton Tribute. Not affiliated with FIA or F1.</p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
