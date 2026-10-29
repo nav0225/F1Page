@@ -1,0 +1,10 @@
+
+ultralytics
+opencv-python
+numpy
+pyodbc
+python-dotenv
+fastapi
+uvicorn
+streamlit
+pandas
