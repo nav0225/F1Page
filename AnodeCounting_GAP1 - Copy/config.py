@@ -70,6 +70,10 @@ class Settings:
     # API / health
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    # Live preview (/mjpeg): encoded only while a viewer is connected
+    preview_max_fps: float = 5.0
+    preview_width: int = 960
+    preview_jpeg_quality: int = 70
     health_max_frame_age_s: float = 10.0
     startup_grace_s: float = 120.0
 
@@ -192,6 +196,9 @@ def load_settings(env: Optional[Mapping[str, str]] = None, require_sql: bool = T
         visibility_window_s=get_num("VISIBILITY_WINDOW_S", defaults.visibility_window_s, float, 60.0),
         api_host=get_str("API_HOST", defaults.api_host),
         api_port=get_num("API_PORT", defaults.api_port, int, 1, 65535),
+        preview_max_fps=get_num("PREVIEW_MAX_FPS", defaults.preview_max_fps, float, 0.2, 30.0),
+        preview_width=get_num("PREVIEW_WIDTH", defaults.preview_width, int, 160, 4096),
+        preview_jpeg_quality=get_num("PREVIEW_JPEG_QUALITY", defaults.preview_jpeg_quality, int, 10, 95),
         health_max_frame_age_s=get_num("HEALTH_MAX_FRAME_AGE_S", defaults.health_max_frame_age_s, float, 1.0),
         startup_grace_s=get_num("STARTUP_GRACE_S", defaults.startup_grace_s, float, 0.0),
         outbox_path=get_str("OUTBOX_PATH", defaults.outbox_path),

@@ -94,6 +94,10 @@ class CounterService:
 
         self.started_mono = time.monotonic()
         self.latest_jpeg = None
+        self.preview_seq = 0             # increments with every new preview image
+        self.preview_clients = 0         # connected /mjpeg viewers; no encoding when 0
+        self.preview_encodes = 0
+        self._last_preview_mono = 0.0
         self.last_frame_mono = None
         self.frames_processed = 0
         self.fps = 0.0
@@ -224,12 +228,17 @@ class CounterService:
             self._record_events(result, frame, lag_ms)
 
             jpeg = None
-            if self.encode_preview is not None:
+            now_mono = time.monotonic()
+            if (self.encode_preview is not None and self.preview_clients > 0
+                    and now_mono - self._last_preview_mono >= 1.0 / self.settings.preview_max_fps):
+                self._last_preview_mono = now_mono
                 totals = self.tally.get(self.local_today())
                 jpeg = self.encode_preview(frame.image, result, self.counter, totals, self.fps)
+                self.preview_encodes += 1
             with self._lock:
                 if jpeg is not None:
                     self.latest_jpeg = jpeg
+                    self.preview_seq += 1
                 self.last_frame_mono = time.monotonic()
             self._save_state()
 
@@ -396,8 +405,13 @@ class CounterService:
                 "totals_source": self.totals_source}
 
     def preview_jpeg(self):
+        """(sequence number, JPEG bytes) of the latest preview image."""
         with self._lock:
-            return self.latest_jpeg
+            return self.preview_seq, self.latest_jpeg
+
+    def preview_client(self, delta):
+        with self._lock:
+            self.preview_clients = max(0, self.preview_clients + delta)
 
     def health(self):
         now = time.monotonic()
