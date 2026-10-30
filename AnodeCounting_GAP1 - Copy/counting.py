@@ -98,6 +98,16 @@ class LineCrossingCounter:
     def accepts(self, det: Detection) -> bool:
         return det.conf is not None and det.conf >= self.min_conf
 
+    def reset_tracks(self) -> None:
+        """
+        Forget all per-track state. Call whenever the tracker is re-created:
+        a new tracker may reuse ids that were already counted, which would
+        otherwise suppress genuine new holes. Totals are kept.
+        """
+        self._last_y.clear()
+        self._last_seen.clear()
+        self._counted.clear()
+
     def update(self, frame_id: int, detections: Iterable[Detection]) -> list:
         crossings = []
         for det in detections:
