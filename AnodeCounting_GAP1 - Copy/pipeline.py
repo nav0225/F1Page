@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from counting import LineCrossingCounter, ModuloGrouper
 from grouping import SpacingClassifier, StructuralGrouper
+from visibility import VisibilityMonitor
 
 
 @dataclass
@@ -47,6 +48,14 @@ def build_groupers(settings):
     if settings.anode_grouping == "structural":
         return structural, modulo
     return modulo, structural
+
+
+def build_visibility(settings, sample_every_s=1.0, min_samples=60) -> VisibilityMonitor:
+    return VisibilityMonitor(
+        settings.line_y, settings.visibility_band_px, (settings.line_x1, settings.line_x2),
+        settings.count_min_conf, settings.visibility_low_ratio, settings.visibility_min_duration_s,
+        settings.visibility_window_s, sample_every_s, min_samples, settings.visibility_baseline,
+    )
 
 
 class FrameProcessor:

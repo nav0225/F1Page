@@ -32,13 +32,14 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 import cv2
 from dotenv import dotenv_values
 
 from config import load_settings
 from overlay import draw_overlay
-from pipeline import FrameProcessor, build_counter, build_groupers
+from pipeline import FrameProcessor, build_counter, build_groupers, build_visibility
 
 
 def percentiles(values, ps=(50, 95, 99)):
@@ -116,6 +117,10 @@ def run(args, detector_factory=None):
     processor = FrameProcessor(detector, counter, grouper, shadow)
     haze = parse_haze(getattr(args, "haze", None))
     hazed_frames = 0
+    # visibility runs on video time; baseline sampled every 0.5 s of video
+    visibility = build_visibility(settings, sample_every_s=0.5, min_samples=10)
+    t_base = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    contrasts, low_rows = [], []
 
     cap = cv2.VideoCapture(settings.video_path)
     if not cap.isOpened():
@@ -161,13 +166,21 @@ def run(args, detector_factory=None):
                 hazed_frames += 1
 
         result = processor.process(frame_id, frame)
+        vt = video_t or 0.0
+        low = visibility.update(frame, result.detections, vt, t_base + timedelta(seconds=vt))
+        contrasts.append(visibility.contrast)
+        if low is not None:
+            low_rows.append({"start_s": round((low.start_utc - t_base).total_seconds(), 2),
+                             "end_s": round((low.end_utc - t_base).total_seconds(), 2), "min_ratio": low.min_ratio})
         timings["decode"].append(t_decode)
         timings["detect"].append(result.timings_ms["detect"])
         timings["count"].append(result.timings_ms["count"])
         timings["total"].append(t_decode + result.timings_ms["detect"] + result.timings_ms["count"])
 
         for h in result.holes:
-            hole_rows.append({"hole_seq": h.seq, "frame_id": h.frame_id, "video_time_s": video_t,
+            # time of the frame in which the line was crossed (a crossing can be confirmed later)
+            hole_rows.append({"hole_seq": h.seq, "frame_id": h.frame_id,
+                              "video_time_s": (h.frame_id - 1) / fps if fps else None,
                               "track_id": h.track_id, "cx": round(h.cx, 1), "cy": round(h.cy, 1),
                               "conf": None if h.conf is None else round(h.conf, 4)})
         for r in result.rejected:
@@ -184,8 +197,12 @@ def run(args, detector_factory=None):
     cap.release()
     if writer is not None:
         writer.release()
-    # close anodes still open at the end of the video
+    # close anodes and low-visibility periods still open at the end of the video
     end_t = (frame_id - 1) / fps if fps else None
+    low = visibility.close(t_base + timedelta(seconds=end_t or 0.0))
+    if low is not None:
+        low_rows.append({"start_s": round((low.start_utc - t_base).total_seconds(), 2),
+                         "end_s": round((low.end_utc - t_base).total_seconds(), 2), "min_ratio": low.min_ratio})
     anode_rows += [anode_row(g, grouper.method, frame_id, end_t) for g in grouper.flush()]
     shadow_rows += [anode_row(g, shadow.method, frame_id, end_t) for g in shadow.flush()]
     # let tracks still in view expire so pending crossings are resolved
@@ -225,6 +242,11 @@ def run(args, detector_factory=None):
                                        for g in (grouper, shadow)
                                        if getattr(g, "classifier", None) is not None and g.classifier.calibrated), None),
         "crossings_rejected": len(rejected_rows),
+        # clear-view contrast of this clip: set VISIBILITY_BASELINE from p90 when calibrating on clear footage
+        "visibility_contrast": {"p50": round(sorted(contrasts)[len(contrasts) // 2], 2) if contrasts else None,
+                                "p90": round(sorted(contrasts)[int(0.9 * (len(contrasts) - 1))], 2) if contrasts else None,
+                                "baseline_used": None if visibility.baseline is None else round(visibility.baseline, 2)},
+        "low_visibility_periods": low_rows,
         "crossings_outside_roi": counter.outside_roi,
         "hazed_frames": hazed_frames,
         "settings": {k: v for k, v in dataclasses.asdict(settings).items()
@@ -259,7 +281,7 @@ def main(argv=None):
     summary = run(args)
     print(json.dumps({k: summary[k] for k in ("frames_processed", "holes_counted", "anodes_counted", "anode_grouping",
                                                "shadow_anodes", "shadow_status", "structural_spacing_px",
-                                               "crossings_rejected",
+                                               "visibility_contrast", "low_visibility_periods", "crossings_rejected",
                                                "hazed_frames", "processing_fps")}, indent=2))
 
 
