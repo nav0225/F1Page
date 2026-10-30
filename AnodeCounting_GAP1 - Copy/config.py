@@ -39,9 +39,15 @@ class Settings:
     holes_per_anode: int = 4
     track_stale_frames: int = 60
 
-    # API
+    # API / health
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    health_max_frame_age_s: float = 10.0
+    startup_grace_s: float = 120.0
+
+    # Local event outbox (survives SQL Server outages and process restarts)
+    outbox_path: str = "data/outbox.sqlite3"
+    outbox_retention_days: int = 30
 
     # SQL Server
     sql_driver: str = "ODBC Driver 17 for SQL Server"
@@ -133,6 +139,10 @@ def load_settings(env: Optional[Mapping[str, str]] = None, require_sql: bool = T
         track_stale_frames=get_num("TRACK_STALE_FRAMES", defaults.track_stale_frames, int, 1),
         api_host=get_str("API_HOST", defaults.api_host),
         api_port=get_num("API_PORT", defaults.api_port, int, 1, 65535),
+        health_max_frame_age_s=get_num("HEALTH_MAX_FRAME_AGE_S", defaults.health_max_frame_age_s, float, 1.0),
+        startup_grace_s=get_num("STARTUP_GRACE_S", defaults.startup_grace_s, float, 0.0),
+        outbox_path=get_str("OUTBOX_PATH", defaults.outbox_path),
+        outbox_retention_days=get_num("OUTBOX_RETENTION_DAYS", defaults.outbox_retention_days, int, 1),
         sql_driver=get_str("SQL_DRIVER", defaults.sql_driver),
         sql_server=get_str("SQL_SERVER", ""),
         sql_db=get_str("SQL_DB", ""),
