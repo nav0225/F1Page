@@ -71,17 +71,33 @@ class Outbox:
                 sent_utc TEXT,
                 dead INTEGER NOT NULL DEFAULT 0,
                 attempts INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT
+                last_error TEXT,
+                local_date TEXT
             )""")
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(outbox)")}
+        if "local_date" not in columns:  # outbox file created by an earlier version
+            self._conn.execute("ALTER TABLE outbox ADD COLUMN local_date TEXT")
         self._conn.execute("CREATE INDEX IF NOT EXISTS ix_outbox_pending ON outbox(sent_utc, dead)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS ix_outbox_local_date ON outbox(local_date, kind)")
 
-    def append(self, kind: str, payload: dict, uid: Optional[str] = None) -> str:
+    def append(self, kind: str, payload: dict, uid: Optional[str] = None,
+               local_date: Optional[str] = None) -> str:
+        """local_date: plant-local date of the event (YYYY-MM-DD), used to restore daily totals."""
         uid = uid or payload.get("uid") or new_uid()
         with self._lock:
             self._conn.execute(
-                "INSERT OR IGNORE INTO outbox(uid, kind, payload, created_utc) VALUES (?, ?, ?, ?)",
-                (uid, kind, json.dumps(payload, default=str), utc_now_iso()))
+                "INSERT OR IGNORE INTO outbox(uid, kind, payload, created_utc, local_date) VALUES (?, ?, ?, ?, ?)",
+                (uid, kind, json.dumps(payload, default=str), utc_now_iso(), local_date))
         return uid
+
+    def count_by_date(self, local_date: str, unsent_only: bool = False) -> dict:
+        """Number of events per kind for one plant-local date."""
+        sql = "SELECT kind, COUNT(*) FROM outbox WHERE local_date = ?"
+        if unsent_only:
+            sql += " AND sent_utc IS NULL"
+        with self._lock:
+            rows = self._conn.execute(sql + " GROUP BY kind", (local_date,)).fetchall()
+        return dict(rows)
 
     def pending(self, limit: int = 100) -> list:
         with self._lock:
@@ -115,6 +131,16 @@ class Outbox:
     def dead_count(self) -> int:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) FROM outbox WHERE dead = 1").fetchone()[0]
+
+    def dates_sent_since(self, hours: float) -> list:
+        """Plant-local dates of the events delivered in the last `hours` hours."""
+        cutoff = datetime.now(timezone.utc).timestamp() - hours * 3600
+        cutoff_iso = datetime.fromtimestamp(cutoff, timezone.utc).isoformat(timespec="milliseconds")
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT local_date FROM outbox WHERE sent_utc >= ? AND local_date IS NOT NULL",
+                (cutoff_iso,)).fetchall()
+        return sorted(r[0] for r in rows)
 
     def prune_sent(self, older_than_days: int) -> int:
         cutoff = datetime.now(timezone.utc).timestamp() - older_than_days * 86400

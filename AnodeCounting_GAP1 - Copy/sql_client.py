@@ -94,36 +94,37 @@ class SqlClient:
             cur.close()
 
     def missing_schema_objects(self):
+        checks = [
+            ("dbo.HoleCrossingEvents.EventUid", "COL_LENGTH('dbo.HoleCrossingEvents', 'EventUid')"),
+            ("dbo.AnodeEvents", "OBJECT_ID('dbo.AnodeEvents')"),
+            ("dbo.AnodeEvents.EventUid", "COL_LENGTH('dbo.AnodeEvents', 'EventUid')"),
+            ("dbo.HoleCrossingEvents.EventTimeUtc", "COL_LENGTH('dbo.HoleCrossingEvents', 'EventTimeUtc')"),
+            ("dbo.AnodeEvents.AnodeTimeUtc", "COL_LENGTH('dbo.AnodeEvents', 'AnodeTimeUtc')"),
+            ("dbo.spRefreshAnodeDaily", "OBJECT_ID('dbo.spRefreshAnodeDaily')"),
+        ]
         cur = self._connection.cursor()
         try:
-            row = cur.execute(
-                "SELECT COL_LENGTH('dbo.HoleCrossingEvents', 'EventUid'), "
-                "OBJECT_ID('dbo.AnodeEvents'), COL_LENGTH('dbo.AnodeEvents', 'EventUid'), "
-                "OBJECT_ID('dbo.spUpsertAnodeDaily')").fetchone()
+            row = cur.execute("SELECT " + ", ".join(expr for _, expr in checks)).fetchone()
         finally:
             cur.close()
-        names = ["dbo.HoleCrossingEvents.EventUid", "dbo.AnodeEvents",
-                 "dbo.AnodeEvents.EventUid", "dbo.spUpsertAnodeDaily"]
-        return [name for name, value in zip(names, row) if value is None]
+        return [name for (name, _), value in zip(checks, row) if value is None]
 
     # ----------------------------
     # Writes
     # ----------------------------
-    def upsert_daily(self, count_date, camera_name, hole_count, anode_count, last_event_time):
-        self._execute(
-            "EXEC dbo.spUpsertAnodeDaily ?, ?, ?, ?, ?",
-            _as_date(count_date), camera_name, int(hole_count), int(anode_count), _as_datetime(last_event_time)
-        )
+    def refresh_daily(self, count_date, camera_name):
+        """Recompute one day's AnodeCountDaily row from the event tables."""
+        self._execute("EXEC dbo.spRefreshAnodeDaily ?, ?", _as_date(count_date), camera_name)
 
     def insert_hole_event(self, e: dict):
         self._execute(
             """
-            INSERT INTO dbo.HoleCrossingEvents(EventUid, EventTime, CameraName, TrackId, Cx, Cy, Confidence, FrameId)
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?
+            INSERT INTO dbo.HoleCrossingEvents(EventUid, EventTime, EventTimeUtc, CameraName, TrackId, Cx, Cy, Confidence, FrameId)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE NOT EXISTS (SELECT 1 FROM dbo.HoleCrossingEvents WHERE EventUid = ?)
             """,
-            e["uid"], _as_datetime(e["event_time"]), e["camera"], int(e["track_id"]),
-            float(e["cx"]), float(e["cy"]),
+            e["uid"], _as_datetime(e["event_time"]), _as_datetime(e.get("event_time_utc")), e["camera"],
+            int(e["track_id"]), float(e["cx"]), float(e["cy"]),
             None if e.get("conf") is None else float(e["conf"]),
             None if e.get("frame_id") is None else int(e["frame_id"]),
             e["uid"],
@@ -132,40 +133,84 @@ class SqlClient:
     def insert_anode_event(self, e: dict):
         self._execute(
             """
-            INSERT INTO dbo.AnodeEvents(EventUid, AnodeTime, CameraName, HoleStartNo, HoleEndNo)
-            SELECT ?, ?, ?, ?, ?
+            INSERT INTO dbo.AnodeEvents(EventUid, AnodeTime, AnodeTimeUtc, CameraName, HoleStartNo, HoleEndNo)
+            SELECT ?, ?, ?, ?, ?, ?
             WHERE NOT EXISTS (SELECT 1 FROM dbo.AnodeEvents WHERE EventUid = ?)
             """,
-            e["uid"], _as_datetime(e["anode_time"]), e["camera"], int(e["hole_start"]), int(e["hole_end"]),
+            e["uid"], _as_datetime(e["anode_time"]), _as_datetime(e.get("anode_time_utc")), e["camera"],
+            int(e["hole_start"]), int(e["hole_end"]),
             e["uid"],
         )
+
+    # ----------------------------
+    # Reads
+    # ----------------------------
+    def fetch_day_counts(self, count_date, camera_name):
+        """(holes, anodes, last_event_time) stored in SQL for one camera and local date."""
+        day = _as_date(count_date)
+        day_start = datetime(day.year, day.month, day.day)
+        cur = self._conn().cursor()
+        try:
+            row = cur.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM dbo.HoleCrossingEvents WHERE CameraName = ? AND CountDate = ?),
+                    (SELECT COUNT(*) FROM dbo.AnodeEvents
+                     WHERE CameraName = ? AND AnodeTime >= ? AND AnodeTime < DATEADD(DAY, 1, ?)),
+                    (SELECT MAX(EventTime) FROM dbo.HoleCrossingEvents WHERE CameraName = ? AND CountDate = ?)
+                """,
+                camera_name, day, camera_name, day_start, day_start, camera_name, day,
+            ).fetchone()
+        finally:
+            cur.close()
+        return int(row[0]), int(row[1]), row[2]
 
 
 class SqlEventSink:
     """Adapter used by EventWriter: routes outbox events to SqlClient and classifies errors."""
 
-    def __init__(self, client: SqlClient):
+    def __init__(self, client: SqlClient, camera_name: str):
         self.client = client
+        self.camera_name = camera_name
         self._handlers = {
-            "hole": client.insert_hole_event,
-            "anode": client.insert_anode_event,
+            "hole": (client.insert_hole_event, "event_time"),
+            "anode": (client.insert_anode_event, "anode_time"),
         }
+        self._dirty_days = set()  # local dates whose daily row must be recomputed
 
     def write(self, kind: str, payload: dict):
-        handler = self._handlers.get(kind)
+        handler, time_key = self._handlers.get(kind, (None, None))
         if handler is None:
             raise PermanentEventError(f"unknown event kind {kind!r}")
         try:
+            day = _as_datetime(payload[time_key]).date()
             handler(payload)
         except (KeyError, TypeError, ValueError) as e:
             raise PermanentEventError(f"malformed {kind} event: {e}") from e
         except Exception as e:
             if _is_duplicate_key(e):
-                return  # already written by an earlier attempt
-            if _is_data_error(e):
+                pass  # already written by an earlier attempt
+            elif _is_data_error(e):
                 raise PermanentEventError(str(e)) from e
-            self.client.close()  # force a fresh connection on the next attempt
-            raise
+            else:
+                self.client.close()  # force a fresh connection on the next attempt
+                raise
+        self._dirty_days.add(day)
+
+    def mark_dirty(self, days) -> None:
+        """Dates (date or 'YYYY-MM-DD') whose daily row must be recomputed at the next refresh."""
+        for day in days:
+            self._dirty_days.add(date.fromisoformat(day) if isinstance(day, str) else day)
+
+    def refresh_dirty_days(self):
+        """Recompute the daily rows of every date that received events. Called periodically."""
+        for day in sorted(self._dirty_days):
+            try:
+                self.client.refresh_daily(day, self.camera_name)
+            except Exception:
+                self.client.close()
+                raise
+            self._dirty_days.discard(day)
 
 
 def _is_duplicate_key(exc) -> bool:
