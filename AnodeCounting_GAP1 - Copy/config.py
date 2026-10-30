@@ -58,6 +58,15 @@ class Settings:
     hole_spacing_2_px: Optional[float] = None  # ... of 2 pitches ahead (learned if unset)
     lane_half_width_px: float = 80.0           # holes within this x distance are in the same lane
 
+    # Visibility (visibility.py): contrast in a band around the counting line
+    # relative to a clear-view baseline; LOW (recorded as a counting gap) when
+    # contrast is low and no hole is detected confidently.
+    visibility_band_px: int = 120
+    visibility_low_ratio: float = 0.5
+    visibility_min_duration_s: float = 2.0
+    visibility_baseline: Optional[float] = None   # clear-view contrast; learned (rolling p90) if unset
+    visibility_window_s: float = 7200.0
+
     # API / health
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -176,6 +185,11 @@ def load_settings(env: Optional[Mapping[str, str]] = None, require_sql: bool = T
         hole_spacing_px=get_num("HOLE_SPACING_PX", None, float, 1.0),
         hole_spacing_2_px=get_num("HOLE_SPACING_2_PX", None, float, 1.0),
         lane_half_width_px=get_num("LANE_HALF_WIDTH_PX", defaults.lane_half_width_px, float, 1.0),
+        visibility_band_px=get_num("VISIBILITY_BAND_PX", defaults.visibility_band_px, int, 10),
+        visibility_low_ratio=get_num("VISIBILITY_LOW_RATIO", defaults.visibility_low_ratio, float, 0.0, 1.0),
+        visibility_min_duration_s=get_num("VISIBILITY_MIN_DURATION_S", defaults.visibility_min_duration_s, float, 0.0),
+        visibility_baseline=get_num("VISIBILITY_BASELINE", None, float, 0.1),
+        visibility_window_s=get_num("VISIBILITY_WINDOW_S", defaults.visibility_window_s, float, 60.0),
         api_host=get_str("API_HOST", defaults.api_host),
         api_port=get_num("API_PORT", defaults.api_port, int, 1, 65535),
         health_max_frame_age_s=get_num("HEALTH_MAX_FRAME_AGE_S", defaults.health_max_frame_age_s, float, 1.0),

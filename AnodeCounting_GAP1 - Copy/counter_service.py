@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 from counting import DailyTally
 from persistence import new_uid
-from pipeline import FrameProcessor, build_counter, build_groupers
+from pipeline import FrameProcessor, build_counter, build_groupers, build_visibility
 
 log = logging.getLogger("anode_counter.service")
 
@@ -82,6 +82,7 @@ class CounterService:
 
         self.counter = build_counter(settings)
         self.grouper, self.shadow = build_groupers(settings)   # counted grouping, comparison grouping
+        self.visibility = build_visibility(settings)
         self.tally = DailyTally()
         self.totals_source = "new"   # how today's totals were initialised at startup
         self._day_seq = {}            # counter hole seq -> hole number within its day
@@ -105,6 +106,7 @@ class CounterService:
         self._lags_ms = deque(maxlen=600)   # capture -> processed, recent frames
         self._frame_times = {}              # recent frame seq -> capture UTC (crossing times)
         self._prev = None                   # last processed frame: (utc, mono, capture failures, restarts)
+        self._last_frame_utc = None         # capture time of the last processed frame (any source)
         self._down_since = None             # last frame time from the previous run (SERVICE_DOWN gap)
         self._last_state_save = 0.0
 
@@ -157,6 +159,10 @@ class CounterService:
         if self._thread is not None:
             self._thread.join(timeout)
         self.grabber.stop()
+        if self._last_frame_utc is not None:
+            low = self.visibility.close(self._last_frame_utc)
+            if low is not None:
+                self._record_gap(low.start_utc, low.end_utc, "LOW_VISIBILITY", "open at service stop")
         self._save_state(force=True)
 
     def is_running(self):
@@ -207,6 +213,12 @@ class CounterService:
                 for seq in sorted(self._frame_times)[:512]:
                     del self._frame_times[seq]
             result = processor.process(frame.seq, frame.image)
+            self._last_frame_utc = frame.t_capture_utc
+            low = self.visibility.update(frame.image, result.detections, frame.t_capture_mono, frame.t_capture_utc)
+            if low is not None:
+                self._record_gap(low.start_utc, low.end_utc, "LOW_VISIBILITY",
+                                 f"belt not observable: contrast down to {low.min_ratio:.0%} of clear view "
+                                 f"and no hole detected confidently")
             lag_ms = (time.monotonic() - frame.t_capture_mono) * 1000.0
             self._lags_ms.append(lag_ms)
             self._record_events(result, frame, lag_ms)
@@ -433,6 +445,9 @@ class CounterService:
                      f"while {self._unpersisted.maxlen} events were waiting")
         if self.last_error:
             degraded(f"last pipeline error: {self.last_error}")
+        visibility = self.visibility.status()
+        if visibility["state"] == "LOW":
+            degraded(f"low visibility since {visibility['low_since_utc']}: belt cannot be observed")
 
         return {
             "status": status,
@@ -450,6 +465,7 @@ class CounterService:
                          "anode_grouping": self.grouper.method,
                          "shadow_grouping": {"method": self.shadow.method, "anodes": self.shadow.anode_count,
                                              "status": dict(self.shadow_status)}},
+            "visibility": visibility,
             "gaps_recorded": self.gaps_recorded,
             "last_gap": self.last_gap,
             "outbox_write_errors": self.persist_errors,
