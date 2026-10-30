@@ -5,7 +5,7 @@ import pytest
 
 from capture import CapturedFrame, FrameGrabber
 from config import load_settings
-from counter_service import CounterService
+from counter_service import CounterService, PendingEvents
 from persistence import EventWriter, Outbox
 from tests.sim import simulate
 
@@ -441,3 +441,43 @@ def test_preview_is_encoded_only_while_a_viewer_is_connected(parts):
     assert n <= SETTINGS.preview_max_fps * (elapsed + 0.5) + 2   # capped at PREVIEW_MAX_FPS
     seq, jpeg = svc.preview_jpeg()
     assert jpeg == b"jpeg" and seq >= 3
+
+
+def test_events_pushed_out_of_full_pending_queue_are_reported(parts):
+    q = PendingEvents(maxlen=3)
+    for i in range(5):
+        q.append(("hole", None, {"uid": str(i)}))
+    assert [e[2]["uid"] for e in q] == ["2", "3", "4"] and q.lost == 2
+    svc = make_service(parts, Script([]))
+    svc._unpersisted = q
+    health = svc.health()
+    assert health["events_lost"] == 2
+    assert any("2 events LOST" in p for p in health["problems"])
+
+
+class OpenLowVisibility:
+    """Visibility monitor stand-in whose LOW period is still open when the service stops."""
+
+    def update(self, image, detections, t_mono, t_utc):
+        return None
+
+    def close(self, t_utc):
+        from visibility import LowVisibilityInterval
+        return LowVisibilityInterval(T0, t_utc, 0.1)
+
+    def status(self):
+        return {"state": "LOW", "contrast": None, "baseline": None, "ratio": None, "low_since_utc": None}
+
+
+def test_low_visibility_open_at_stop_is_recorded_for_file_sources(parts):
+    outbox, _, writer = parts
+    grabber = ScriptedRealtimeGrabber(frames_at([(1, 0.0), (2, 0.05), (3, 0.10)]))
+    grabber.realtime = False                      # video file: no gap tracking
+    svc = CounterService(SETTINGS, outbox, writer, lambda: (lambda img: []), grabber, local_tz=IST)
+    svc.visibility = OpenLowVisibility()
+    svc.start()
+    assert run_until(lambda: svc.frames_processed == 3)
+    svc.stop()
+    gaps = gaps_in(outbox)
+    assert [g["reason"] for g in gaps] == ["LOW_VISIBILITY"]
+    assert gaps[0]["end_time_utc"] == "2026-10-30T10:00:00.100000"   # last processed frame

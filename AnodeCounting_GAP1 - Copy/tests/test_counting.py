@@ -196,6 +196,40 @@ def test_crossing_confirmed_later_keeps_crossing_frame():
     assert out[3][0].frame_id == 2
 
 
+def test_holes_numbered_in_crossing_order_when_evidence_completes_out_of_order():
+    # hole 1 crosses first (frame 2) with one confident hit; hole 2 crosses at
+    # frame 4 with two; hole 1 gets its second confident hit only at frame 5
+    frames = [
+        [det(1, 530, 0.9), det(2, 580, 0.9)],
+        [det(1, 515, 0.5), det(2, 560, 0.9)],
+        [det(1, 500, 0.5), det(2, 530, 0.5)],
+        [det(1, 485, 0.5), det(2, 515, 0.5)],
+        [det(1, 470, 0.9), det(2, 500, 0.5)],
+    ]
+    c = track_counter()
+    out = [c.update(i, f) for i, f in enumerate(frames, start=1)]
+    assert [len(o) for o in out] == [0, 0, 0, 0, 2]          # hole 2 waits for hole 1
+    assert [(h.seq, h.track_id, h.frame_id) for h in out[4]] == [(1, 1, 2), (2, 2, 4)]
+
+
+def test_held_crossing_released_when_earlier_track_is_rejected_or_tracker_resets():
+    frames = [
+        [det(1, 530, 0.9), det(2, 580, 0.9)],
+        [det(1, 515, 0.5), det(2, 560, 0.9)],
+        [det(2, 530, 0.5)],
+        [det(2, 515, 0.5)],
+    ]
+    holes, rejected = feed(track_counter(), frames)             # track 1 never qualifies
+    assert [(h.seq, h.track_id) for h in holes] == [(1, 2)]
+    assert [r.track_id for r in rejected] == [1]
+
+    c = track_counter()
+    for i, f in enumerate(frames, start=1):
+        assert c.update(i, f) == []                              # track 2 held behind track 1
+    c.reset_tracks()                                             # pipeline restart: track 1 is gone
+    assert [(h.seq, h.track_id) for h in c.update(5, [])] == [(1, 2)]
+
+
 def test_crossing_outside_roi_never_counts():
     c = track_counter(x_range=(400, 1000))
     frames = [[det(1, y, 0.9, cx=1500)] for y in (540, 530, 515, 500)]

@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from capture import FrameGrabber, ffmpeg_capture_options
+from capture import FrameGrabber, ffmpeg_capture_options, open_rtsp
 
 APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -136,3 +136,18 @@ def test_service_ffmpeg_options_decode_every_frame_of_sample_video():
     assert decoded(ffmpeg_capture_options("tcp")) == 579
     # the option removed by this change loses everything before the 2nd keyframe
     assert decoded("rtsp_transport;tcp|fflags;nobuffer|flags;low_delay") == 579 - 158
+
+
+@pytest.mark.parametrize("has_timeouts", [True, False])
+def test_open_rtsp_uses_timeouts_only_where_opencv_has_them(monkeypatch, has_timeouts):
+    import types
+    calls = []
+    cv2 = types.ModuleType("cv2")
+    cv2.CAP_FFMPEG = 1900
+    cv2.VideoCapture = lambda *args: calls.append(args) or "capture"
+    if has_timeouts:   # OpenCV 4.5.4+
+        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, cv2.CAP_PROP_READ_TIMEOUT_MSEC = 53, 54
+    monkeypatch.setitem(sys.modules, "cv2", cv2)
+    assert open_rtsp("rtsp://camera/stream", 10000, 5000) == "capture"
+    expected = ("rtsp://camera/stream", 1900, [53, 10000, 54, 5000]) if has_timeouts else ("rtsp://camera/stream", 1900)
+    assert calls == [expected]

@@ -143,6 +143,19 @@ def run(args, detector_factory=None):
                 "method": method, "status": getattr(g, "status", ""), "holes_seen": len(g.holes),
                 "slots": " ".join(str(s) for s in getattr(g, "slots", ())),
                 "close_reason": getattr(g, "close_reason", "")}
+
+    def hole_row(h):
+        # time of the frame in which the line was crossed (a crossing can be confirmed later)
+        return {"hole_seq": h.seq, "frame_id": h.frame_id,
+                "video_time_s": (h.frame_id - 1) / fps if fps else None,
+                "track_id": h.track_id, "cx": round(h.cx, 1), "cy": round(h.cy, 1),
+                "conf": None if h.conf is None else round(h.conf, 4)}
+
+    def rejected_row(r):
+        return {"frame_id": r.frame_id, "video_time_s": (r.frame_id - 1) / fps if fps else None,
+                "track_id": r.track_id, "cx": round(r.cx, 1), "cy": round(r.cy, 1),
+                "max_conf": None if r.max_conf is None else round(r.max_conf, 4),
+                "strong_hits": r.strong_hits, "reason": r.reason}
     timings = {"decode": [], "detect": [], "count": [], "total": []}
     line = (settings.line_x1, settings.line_y, settings.line_x2)
     frame_id = 0
@@ -177,17 +190,8 @@ def run(args, detector_factory=None):
         timings["count"].append(result.timings_ms["count"])
         timings["total"].append(t_decode + result.timings_ms["detect"] + result.timings_ms["count"])
 
-        for h in result.holes:
-            # time of the frame in which the line was crossed (a crossing can be confirmed later)
-            hole_rows.append({"hole_seq": h.seq, "frame_id": h.frame_id,
-                              "video_time_s": (h.frame_id - 1) / fps if fps else None,
-                              "track_id": h.track_id, "cx": round(h.cx, 1), "cy": round(h.cy, 1),
-                              "conf": None if h.conf is None else round(h.conf, 4)})
-        for r in result.rejected:
-            rejected_rows.append({"frame_id": r.frame_id, "video_time_s": (r.frame_id - 1) / fps if fps else None,
-                                  "track_id": r.track_id, "cx": round(r.cx, 1), "cy": round(r.cy, 1),
-                                  "max_conf": None if r.max_conf is None else round(r.max_conf, 4),
-                                  "strong_hits": r.strong_hits, "reason": r.reason})
+        hole_rows += [hole_row(h) for h in result.holes]
+        rejected_rows += [rejected_row(r) for r in result.rejected]
         anode_rows += [anode_row(g, grouper.method, frame_id, video_t) for g in result.anodes]
         shadow_rows += [anode_row(g, shadow.method, frame_id, video_t) for g in result.shadow_anodes]
 
@@ -203,16 +207,17 @@ def run(args, detector_factory=None):
     if low is not None:
         low_rows.append({"start_s": round((low.start_utc - t_base).total_seconds(), 2),
                          "end_s": round((low.end_utc - t_base).total_seconds(), 2), "min_ratio": low.min_ratio})
+    # let tracks still in view expire so pending crossings are resolved; crossings
+    # released by that (held behind an earlier pending one) are counted and grouped
+    # before the open anodes are closed
+    for extra in range(settings.track_stale_frames + 2):
+        for h in counter.update(frame_id + 1 + extra, []):
+            hole_rows.append(hole_row(h))
+            anode_rows += [anode_row(g, grouper.method, frame_id, end_t) for g in grouper.add(h)]
+            shadow_rows += [anode_row(g, shadow.method, frame_id, end_t) for g in shadow.add(h)]
+        rejected_rows += [rejected_row(r) for r in counter.drain_rejected()]
     anode_rows += [anode_row(g, grouper.method, frame_id, end_t) for g in grouper.flush()]
     shadow_rows += [anode_row(g, shadow.method, frame_id, end_t) for g in shadow.flush()]
-    # let tracks still in view expire so pending crossings are resolved
-    for extra in range(settings.track_stale_frames + 2):
-        counter.update(frame_id + 1 + extra, [])
-        for r in counter.drain_rejected():
-            rejected_rows.append({"frame_id": r.frame_id, "video_time_s": (r.frame_id - 1) / fps if fps else None,
-                                  "track_id": r.track_id, "cx": round(r.cx, 1), "cy": round(r.cy, 1),
-                                  "max_conf": None if r.max_conf is None else round(r.max_conf, 4),
-                                  "strong_hits": r.strong_hits, "reason": r.reason})
     wall_s = time.perf_counter() - wall_start
 
     anode_fields = ["anode_seq", "frame_id", "video_time_s", "hole_start", "hole_end", "hole_track_ids",

@@ -144,3 +144,16 @@ def test_outbox_file_from_previous_version_is_upgraded(tmp_path):
     assert ob.backlog() == 1
     ob.append("hole", {"uid": "y"}, local_date="2026-10-30")
     assert ob.count_by_date("2026-10-30") == {"hole": 1}
+
+
+def test_dates_sent_since_lists_recently_delivered_days(tmp_path):
+    outbox = Outbox(str(tmp_path / "outbox.sqlite3"))
+    sent = [outbox.append("hole", {"uid": f"u{i}"}, local_date=d) for i, d in
+            enumerate(["2026-10-29", "2026-10-30", "2026-10-30"])]
+    outbox.append("hole", {"uid": "pending"}, local_date="2026-10-31")
+    for uid in sent:
+        outbox.mark_sent(uid)
+    assert outbox.dates_sent_since(hours=24) == ["2026-10-29", "2026-10-30"]   # undelivered day not listed
+    with outbox._lock:
+        outbox._conn.execute("UPDATE outbox SET sent_utc = '2026-01-01T00:00:00.000+00:00'")
+    assert outbox.dates_sent_since(hours=24) == []

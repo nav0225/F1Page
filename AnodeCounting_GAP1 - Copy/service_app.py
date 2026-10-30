@@ -98,11 +98,22 @@ writer = EventWriter(outbox, sink, periodic=sink.refresh_dirty_days,
 service = CounterService(settings, outbox, writer, make_detector, make_grabber(), encode_preview)
 
 
-instance_lock = InstanceLock(os.path.join(os.path.dirname(os.path.abspath(settings.outbox_path)), "counter.lock"))
+# One lock per outbox file: a second counter for the same camera/outbox refuses to
+# start, while counters for other cameras (own OUTBOX_PATH) can share the folder.
+instance_lock = InstanceLock(os.path.abspath(settings.outbox_path) + ".lock")
 
 
 def before_start():
     instance_lock.acquire()   # refuse to start a second counter for the same outbox/camera
+    try:
+        # An event written to SQL just before the previous run stopped may not
+        # have been marked as sent. Delivering one batch now (inserts are
+        # idempotent) settles it, so it is not counted twice below.
+        writer.drain_once()
+        # Daily rows whose periodic refresh may not have run before the stop
+        sink.mark_dirty(outbox.dates_sent_since(hours=24))
+    except Exception as e:
+        log.warning("Startup delivery check failed (%s); continuing", e)
     service.restore_today(lambda day: sql.fetch_day_counts(day, settings.camera_name))
 
 

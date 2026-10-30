@@ -86,3 +86,10 @@ def test_anode_grouping_settings():
     assert s.anode_grouping == "structural" and (s.hole_spacing_px, s.hole_spacing_2_px) == (64.9, 108.5)
     with pytest.raises(ConfigError, match="ANODE_GROUPING"):
         load_settings(dict(BASE, ANODE_GROUPING="every4th"))
+
+
+@pytest.mark.parametrize("key,value", [("COUNT_MIN_CONF", "nan"), ("CONF_THRES", "NaN"), ("IOU_THRES", "inf")])
+def test_non_finite_numbers_rejected(key, value):
+    # a NaN threshold passes any range check and would silently stop all counting
+    with pytest.raises(ConfigError, match=f"{key}.*not a finite number"):
+        load_settings(dict(BASE, **{key: value}))

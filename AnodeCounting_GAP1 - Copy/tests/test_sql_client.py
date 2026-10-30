@@ -218,3 +218,27 @@ def test_anode_insert_carries_grouping_evidence_and_shadow_goes_to_own_table(fak
                                     slots="", close_reason=None))
     sql, params = fake_pyodbc.connections[0].executed[-1]
     assert "INSERT INTO dbo.AnodeGroupingShadow" in sql and params[4] == "MODULO"
+
+
+def test_startup_drain_settles_event_committed_before_a_stop(fake_pyodbc, tmp_path):
+    """
+    The previous run wrote an event to SQL but stopped before marking it as
+    sent. One delivery batch at startup (as service_app does before restoring
+    totals) marks it as sent instead of leaving it to be counted twice, and
+    the days delivered recently are refreshed again.
+    """
+    from persistence import EventWriter, Outbox
+    from sql_client import SqlEventSink
+    outbox = Outbox(str(tmp_path / "outbox.sqlite3"))
+    outbox.append("hole", HOLE, local_date="2026-10-30")
+    client = make_client()
+    client._conn().raise_on_execute = fake_pyodbc.IntegrityError("23000", "duplicate key (2627)")   # already in SQL
+    sink = SqlEventSink(client, "Camera_01")
+    EventWriter(outbox, sink).drain_once()
+    assert outbox.count_by_date("2026-10-30", unsent_only=True) == {}
+
+    restarted = SqlEventSink(client, "Camera_01")   # new process: in-memory dirty days are gone
+    restarted.mark_dirty(outbox.dates_sent_since(hours=24))
+    restarted.refresh_dirty_days()
+    calls = [p for sql, p in fake_pyodbc.connections[-1].executed if sql.startswith("EXEC dbo.spRefreshAnodeDaily")]
+    assert [p[0].isoformat() for p in calls][-1:] == ["2026-10-30"]

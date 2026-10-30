@@ -232,6 +232,23 @@ way, what is better than Phase 1, how it was verified, and the files involved.
 * Existing database columns, rows and `spUpsertAnodeDaily` are untouched; the
   Phase 1 service still runs against a migrated database (rollback path).
 
+### 3.14 Fixes from code review
+
+Automated review of the pull requests found the following; each fix is in the
+pull request that introduced the code and has a test.
+
+| Problem found | Fix | File |
+|---|---|---|
+| `COUNT_MIN_CONF=nan` passed validation and silently stopped all counting. | `nan`/`inf` rejected at startup. | `config.py` |
+| While the outbox is unwritable, events wait in a bounded memory queue; when it was full the oldest were dropped without a trace. | Dropped events counted, logged as critical and shown in `/health` (`events_lost`). | `counter_service.py` |
+| An event written to SQL just before a stop, but not yet marked as sent, was counted twice in today's restored totals. | One idempotent delivery batch runs before the restore. | `service_app.py` |
+| A daily-row refresh pending at a stop was forgotten. | Days with events delivered in the last 24 h are refreshed again at startup. | `persistence.py`, `sql_client.py`, `service_app.py` |
+| On OpenCV older than 4.5.4 the RTSP timeout properties are missing and the camera never opened. | Properties looked up safely; FFmpeg defaults used when missing. | `capture.py` |
+| A hole whose evidence completed after the next hole had qualified was numbered after it, which could attribute it to the wrong anode (modulo) or split an anode (structural). | Holes numbered in crossing order (a qualified crossing waits at most `TRACK_STALE_FRAMES` for an earlier pending one). Video1.mp4 results unchanged. | `counting.py`, `replay.py` |
+| With `SOURCE=file` a low-visibility period still open at stop was not recorded. | Last processed frame time kept for every source. | `counter_service.py` |
+| Two cameras with separate outboxes in one folder shared one lock file. | Lock file per outbox (`<OUTBOX_PATH>.lock`). | `service_app.py` |
+| The dashboard hid the anode evidence line when no anode had a status (default modulo grouping). | `NOT ASSESSED` shown. | `dashboard_app.py` |
+
 ---
 
 ## 4. File-by-file guide
@@ -298,19 +315,19 @@ Status: **New** (added in Phase 2), **Rewritten**, **Modified**, **Unchanged**.
 | `.gitignore` | Modified | Ignored files. | Adds the local outbox folder `data/` and test caches. |
 | `README.md` | New | This document. | Explains the project, Phase 2, every file, operation and validation. |
 
-### Tests (178 in total, `python -m pytest tests`)
+### Tests (190 in total, `python -m pytest tests`)
 
 | File | Tests | What it proves |
 |---|---|---|
-| `tests/test_counting.py` | 83 | New counter equals the Phase 1 loop (40 randomized scenarios); line-crossing rules; track evidence recovers weak crossings without over-counting (30 scenarios); rejected crossings; ROI gate; memory release. |
+| `tests/test_counting.py` | 85 | New counter equals the Phase 1 loop (40 randomized scenarios); line-crossing rules; track evidence recovers weak crossings without over-counting (30 scenarios); rejected crossings; ROI gate; memory release; holes numbered in crossing order when evidence completes out of order. |
 | `tests/test_grouping.py` | 29 | Structural grouping: clean train, start mid-anode, one missed hole in each position, belt stop, flicker (20 scenarios), spacing model, cold-start calibration. |
-| `tests/test_service.py` | 15 | Counting through SQL outages and pipeline errors, midnight roll-over, restart restore, every gap reason, capture-time events, preview gating, `/health` status codes. |
-| `tests/test_sql_client.py` | 11 | Idempotent inserts, duplicate/data/transient error handling, schema check, daily refresh for late deliveries, grouping evidence columns. |
-| `tests/test_config.py` | 10 | Defaults, required settings, all errors reported together, legacy modes selectable, secrets not printed. |
-| `tests/test_persistence.py` | 9 | Outbox order and durability, retries without loss or duplicates, dead letters, per-day counts, upgrade of older outbox files. |
-| `tests/test_capture.py` | 7 | Frame order, bounded backlog, hiccup absorption, reconnect, open failures, all 579 frames of `Video1.mp4` decoded with the service's options. |
+| `tests/test_service.py` | 17 | Counting through SQL outages and pipeline errors, midnight roll-over, restart restore, every gap reason, capture-time events, preview gating, `/health` status codes; events lost from a full pending queue reported; open low-visibility period closed at stop for file sources. |
+| `tests/test_sql_client.py` | 12 | Idempotent inserts, duplicate/data/transient error handling, schema check, daily refresh for late deliveries, grouping evidence columns; startup delivery settles an event committed just before a stop. |
+| `tests/test_config.py` | 13 | Defaults, required settings, all errors reported together, legacy modes selectable, secrets not printed, `nan`/`inf` rejected. |
+| `tests/test_persistence.py` | 10 | Outbox order and durability, retries without loss or duplicates, dead letters, per-day counts, upgrade of older outbox files, recently delivered days. |
+| `tests/test_capture.py` | 9 | Frame order, bounded backlog, hiccup absorption, reconnect, open failures, all 579 frames of `Video1.mp4` decoded with the service's options; RTSP opens on OpenCV builds without timeout properties. |
 | `tests/test_visibility.py` | 7 | Clear view and empty belt OK, reduced contrast with detections not a gap, blind period becomes one gap, short blips ignored, baseline not dragged down by long fumes. |
-| `tests/test_dashboard.py` | 4 | Day queries on migrated and original schemas; page renders on both and with the service unreachable. |
+| `tests/test_dashboard.py` | 5 | Day queries on migrated and original schemas; page renders on both and with the service unreachable; anodes without assessment shown as NOT ASSESSED. |
 | `tests/test_evaluate.py` | 1 | Misses, extras and mixed anodes counted correctly. |
 | `tests/test_replay.py` | 1 | Replay writes holes, anodes and summary from a video file. |
 | `tests/test_instance_lock.py` | 1 | A second process cannot start; lock released when the owner dies. |
@@ -520,7 +537,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests
 ```
 
-178 tests; see the table in section 4 for what each file proves.
+190 tests; see the table in section 4 for what each file proves.
 
 ---
 

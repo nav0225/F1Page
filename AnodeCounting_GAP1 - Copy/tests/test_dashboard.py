@@ -125,3 +125,25 @@ def test_dashboard_page_renders(monkeypatch, migrated):
     assert metrics["Anodes"] == "3" and metrics["Holes"] == "11"
     assert metrics["Belt not observable"] == ("15.0 min" if migrated else "n/a")
     assert any("not reachable" in e.value for e in at.error)        # service down is shown, page still works
+
+
+def test_anodes_without_assessment_are_shown_as_not_assessed(monkeypatch):
+    """Default modulo grouping: every CountStatus is NULL, shown as NOT ASSESSED."""
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    db = FakeDb()
+    db.anodes = [r[:4] + ("MODULO", 4, None) for r in db.anodes]
+    fake = types.ModuleType("pyodbc")
+    fake.connect = lambda *a, **k: db
+    monkeypatch.setitem(sys.modules, "pyodbc", fake)
+    monkeypatch.setenv("SERVICE_URL", "http://127.0.0.1:9")
+    monkeypatch.chdir(APP_DIR)
+    monkeypatch.syspath_prepend(APP_DIR)
+
+    at = AppTest.from_file(os.path.join(APP_DIR, "dashboard_app.py"), default_timeout=30)
+    at.run()
+    at.sidebar.date_input[0].set_value(DAY)
+    at.run()
+    assert not at.exception
+    assert any("NOT ASSESSED: 3" in c.value for c in at.caption)
