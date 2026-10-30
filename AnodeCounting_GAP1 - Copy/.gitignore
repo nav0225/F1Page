@@ -22,3 +22,6 @@ runs/
 
 # Test / tool outputs
 .pytest_cache/
+
+# Local event outbox (runtime data)
+data/

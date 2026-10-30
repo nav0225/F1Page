@@ -1,20 +1,24 @@
+"""
+Entry point of the anode counter service.
+
+Run with exactly one worker process (the counter owns the camera stream and
+the counting state):
+    python service_app.py
+or
+    uvicorn service_app:app --host 0.0.0.0 --port 8000
+"""
 import logging
 import os
-import time
-import threading
-from datetime import datetime, date
 
 import cv2
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse, JSONResponse
 
+from api import create_app
 from config import load_settings
-from counting import LineCrossingCounter, ModuloGrouper
-from detector import YoloTracker
+from counter_service import CounterService
 from overlay import draw_overlay
-from pipeline import FrameProcessor
-from sql_client import SqlClient, SqlConfig
+from persistence import EventWriter, Outbox
+from sql_client import SqlClient, SqlConfig, SqlEventSink
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("anode_counter")
@@ -25,15 +29,6 @@ load_dotenv()
 # Config
 # ----------------------------
 settings = load_settings()
-
-sql = SqlClient(SqlConfig(
-    driver=settings.sql_driver,
-    server=settings.sql_server,
-    database=settings.sql_db,
-    user=settings.sql_user,
-    password=settings.sql_pass,
-    trusted=settings.sql_trusted,
-))
 
 # Low latency hints for FFmpeg backend
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{settings.rtsp_transport}|fflags;nobuffer|flags;low_delay"
@@ -51,6 +46,12 @@ def log_device():
         log.warning("Could not query torch device info: %s", e)
 
 
+def make_detector():
+    from detector import YoloTracker
+    log_device()
+    return YoloTracker(settings.model_path, settings.conf_thres, settings.iou_thres, settings.device)
+
+
 def open_source():
     if settings.source == "file":
         log.info("Using VIDEO file: %s", settings.video_path)
@@ -59,144 +60,52 @@ def open_source():
     return cv2.VideoCapture(settings.rtsp_url, cv2.CAP_FFMPEG)
 
 
-# ----------------------------
-# Shared State
-# ----------------------------
-state_lock = threading.Lock()
-latest_jpeg = None
-latest_stats = {
-    "camera": settings.camera_name,
-    "date": date.today().isoformat(),
-    "hole_count": 0,
-    "anode_count": 0,
-    "last_event_time": None,
-    "fps": 0.0,
-}
-
-
-# ----------------------------
-# Inference loop
-# ----------------------------
-def inference_loop():
-    global latest_jpeg, latest_stats
-
-    log_device()
-    detector = YoloTracker(settings.model_path, settings.conf_thres, settings.iou_thres, settings.device)
-    counter = LineCrossingCounter(settings.line_y, settings.count_direction,
-                                  settings.count_min_conf, settings.track_stale_frames)
-    grouper = ModuloGrouper(settings.holes_per_anode)
-    processor = FrameProcessor(detector, counter, grouper)
+def encode_preview(frame, result, counter, grouper, fps):
     line = (settings.line_x1, settings.line_y, settings.line_x2)
+    annotated = draw_overlay(frame, result, counter, line, counter.hole_count, grouper.anode_count, fps)
+    ok, jpg = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    return jpg.tobytes() if ok else None
 
-    cap = open_source()
 
-    frame_id = 0
-    last_sql_push = 0.0
+def make_daily_pusher(service, sql):
+    """Writes the daily totals row from the writer thread when the totals change."""
+    last = {"snapshot": None}
 
-    t0 = time.time()
-    frames = 0
-    fps = 0.0
+    def push():
+        snapshot = service.daily_snapshot()
+        if snapshot == last["snapshot"]:
+            return
+        sql.upsert_daily(snapshot["date"], settings.camera_name, snapshot["hole_count"],
+                         snapshot["anode_count"], snapshot["last_event_time"])
+        last["snapshot"] = snapshot
 
-    while True:
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            # Reconnect
-            cap.release()
-            time.sleep(1)
-            cap = open_source()
-            continue
-
-        frame_id += 1
-        frames += 1
-
-        # FPS calc
-        dt = time.time() - t0
-        if dt >= 1.0:
-            fps = frames / dt
-            frames = 0
-            t0 = time.time()
-
-        result = processor.process(frame_id, frame)
-
-        now = datetime.now()
-        last_event_time = None
-
-        for hole in result.holes:
-            last_event_time = now
-            sql.insert_event(now, settings.camera_name, hole.track_id, hole.cx, hole.cy, conf=hole.conf)
-
-        for group in result.anodes:
-            sql.insert_anode_event(
-                anode_time=now,
-                camera_name=settings.camera_name,
-                hole_start=group.hole_start,
-                hole_end=group.hole_end,
-            )
-            sql.upsert_daily(date.today(), settings.camera_name, counter.hole_count,
-                             grouper.anode_count, last_event_time)
-
-        annotated = draw_overlay(frame, result, counter, line, counter.hole_count, grouper.anode_count, fps)
-
-        # Update shared state
-        ok2, jpg = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-        if ok2:
-            with state_lock:
-                latest_jpeg = jpg.tobytes()
-                latest_stats = {
-                    "camera": settings.camera_name,
-                    "date": date.today().isoformat(),
-                    "hole_count": counter.hole_count,
-                    "anode_count": grouper.anode_count,
-                    "last_event_time": last_event_time.isoformat() if last_event_time else latest_stats.get("last_event_time"),
-                    "fps": float(fps),
-                }
-
-        # Upsert daily totals periodically
-        if (time.time() - last_sql_push > 5) or (last_event_time and time.time() - last_sql_push > 1):
-            try:
-                sql.upsert_daily(date.today(), settings.camera_name, counter.hole_count,
-                                 grouper.anode_count, last_event_time)
-                last_sql_push = time.time()
-            except Exception as e:
-                log.error("SQL upsert_daily failed: %s", e)
+    return push
 
 
 # ----------------------------
-# FastAPI
+# Wiring
 # ----------------------------
-app = FastAPI(title="Anode Counter Service")
+os.makedirs(os.path.dirname(os.path.abspath(settings.outbox_path)), exist_ok=True)
+outbox = Outbox(settings.outbox_path)
+sql = SqlClient(SqlConfig(
+    driver=settings.sql_driver,
+    server=settings.sql_server,
+    database=settings.sql_db,
+    user=settings.sql_user,
+    password=settings.sql_pass,
+    trusted=settings.sql_trusted,
+))
+writer = EventWriter(outbox, SqlEventSink(sql), prune_days=settings.outbox_retention_days)
+service = CounterService(settings, outbox, writer, make_detector, open_source, encode_preview)
+writer.periodic = make_daily_pusher(service, sql)
+
+app = create_app(service, writer)
 
 
-@app.on_event("startup")
-def startup():
-    th = threading.Thread(target=inference_loop, daemon=True)
-    th.start()
+def main():
+    import uvicorn
+    uvicorn.run(app, host=settings.api_host, port=settings.api_port, workers=1)
 
 
-def mjpeg_generator():
-    while True:
-        with state_lock:
-            frame = latest_jpeg
-        if frame is None:
-            time.sleep(0.05)
-            continue
-        yield (b"--frame\r\n"
-               b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-        time.sleep(0.03)
-
-
-@app.get("/mjpeg")
-def mjpeg():
-    return StreamingResponse(mjpeg_generator(),
-                             media_type="multipart/x-mixed-replace; boundary=frame")
-
-
-@app.get("/stats")
-def stats():
-    with state_lock:
-        return JSONResponse(latest_stats)
-
-
-@app.get("/")
-def root():
-    return {"message": "Anode Counter Service running", "endpoints": ["/mjpeg", "/stats"]}
+if __name__ == "__main__":
+    main()
