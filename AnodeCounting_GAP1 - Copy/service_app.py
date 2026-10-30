@@ -98,7 +98,9 @@ writer = EventWriter(outbox, sink, periodic=sink.refresh_dirty_days,
 service = CounterService(settings, outbox, writer, make_detector, make_grabber(), encode_preview)
 
 
-instance_lock = InstanceLock(os.path.join(os.path.dirname(os.path.abspath(settings.outbox_path)), "counter.lock"))
+# One lock per outbox file: a second counter for the same camera/outbox refuses to
+# start, while counters for other cameras (own OUTBOX_PATH) can share the folder.
+instance_lock = InstanceLock(os.path.abspath(settings.outbox_path) + ".lock")
 
 
 def before_start():
