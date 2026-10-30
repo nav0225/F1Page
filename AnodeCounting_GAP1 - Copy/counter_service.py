@@ -17,12 +17,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from datetime import datetime, timezone
 
-from counting import DailyTally, ModuloGrouper
+from counting import DailyTally
 from persistence import new_uid
-from pipeline import FrameProcessor, build_counter
+from pipeline import FrameProcessor, build_counter, build_groupers
 
 log = logging.getLogger("anode_counter.service")
 
@@ -60,7 +60,7 @@ class CounterService:
         self.local_tz = local_tz
 
         self.counter = build_counter(settings)
-        self.grouper = ModuloGrouper(settings.holes_per_anode)
+        self.grouper, self.shadow = build_groupers(settings)   # counted grouping, comparison grouping
         self.tally = DailyTally()
         self.totals_source = "new"   # how today's totals were initialised at startup
         self._day_seq = {}            # counter hole seq -> hole number within its day
@@ -80,6 +80,7 @@ class CounterService:
         self.persist_errors = 0
         self.gaps_recorded = 0
         self.last_gap = None
+        self.shadow_status = Counter()        # status of comparison-grouping anodes since start
         self._lags_ms = deque(maxlen=600)   # capture -> processed, recent frames
         self._frame_times = {}              # recent frame seq -> capture UTC (crossing times)
         self._prev = None                   # last processed frame: (utc, mono, capture failures, restarts)
@@ -159,7 +160,9 @@ class CounterService:
     def _run_pipeline(self):
         detector = self.detector_factory()
         self.counter.reset_tracks()  # new tracker instance -> old track ids are meaningless
-        processor = FrameProcessor(detector, self.counter, self.grouper)
+        self.grouper.reset_tracks()
+        self.shadow.reset_tracks()
+        processor = FrameProcessor(detector, self.counter, self.grouper, self.shadow)
 
         t0 = time.time()
         frames = 0
@@ -267,7 +270,7 @@ class CounterService:
     # Events
     # ----------------------------
     def _record_events(self, result, frame, lag_ms):
-        if not result.holes and not result.rejected and not self._unpersisted:
+        if not result.holes and not result.rejected and not result.shadow_anodes and not self._unpersisted:
             return
         t_utc = frame.t_capture_utc
         t_local = self.to_local(t_utc)
@@ -300,16 +303,30 @@ class CounterService:
             for group in result.anodes:
                 self.tally.add_anode(day, t_local)
                 self._unpersisted.append(("anode", day, {
-                    "uid": new_uid(), "anode_time": t_local.isoformat(),
-                    "anode_time_utc": t_utc.replace(tzinfo=None).isoformat(), "camera": camera,
-                    "hole_start": self._day_seq.get(group.hole_start, group.hole_start),
-                    "hole_end": self._day_seq.get(group.hole_end, group.hole_end),
+                    **self._anode_fields(group, self.grouper.method, t_utc, t_local, camera),
                     "lag_ms": lag,
                 }))
+            for group in result.shadow_anodes:
+                self._unpersisted.append(("anode_shadow", day, {
+                    **self._anode_fields(group, self.shadow.method, t_utc, t_local, camera),
+                    "slots": " ".join(str(s) for s in getattr(group, "slots", ())),
+                    "close_reason": getattr(group, "close_reason", None),
+                }))
+                self.shadow_status[getattr(group, "status", "NONE")] += 1
             for seq in [s for s in self._day_seq if s <= self.counter.hole_count - 64]:
                 del self._day_seq[seq]
 
         self._flush_unpersisted()
+
+    def _anode_fields(self, group, method, t_utc, t_local, camera):
+        return {
+            "uid": new_uid(), "anode_time": t_local.isoformat(),
+            "anode_time_utc": t_utc.replace(tzinfo=None).isoformat(), "camera": camera,
+            "hole_start": self._day_seq.get(group.hole_start, group.hole_start),
+            "hole_end": self._day_seq.get(group.hole_end, group.hole_end),
+            "grouping_method": method, "holes_seen": len(group.holes),
+            "count_status": getattr(group, "status", None),   # None for MODULO: not assessed
+        }
 
     def _flush_unpersisted(self):
         while self._unpersisted:
@@ -405,7 +422,10 @@ class CounterService:
             "lag_ms": {"p50": _percentile(lags, 50), "p95": _percentile(lags, 95), "max": max(lags) if lags else None},
             "pipeline_restarts": self.loop_restarts,
             "counting": {"evidence": self.counter.evidence, "rejected_crossings": self.counter.rejected_count,
-                         "crossings_outside_roi": self.counter.outside_roi},
+                         "crossings_outside_roi": self.counter.outside_roi,
+                         "anode_grouping": self.grouper.method,
+                         "shadow_grouping": {"method": self.shadow.method, "anodes": self.shadow.anode_count,
+                                             "status": dict(self.shadow_status)}},
             "gaps_recorded": self.gaps_recorded,
             "last_gap": self.last_gap,
             "outbox_write_errors": self.persist_errors,

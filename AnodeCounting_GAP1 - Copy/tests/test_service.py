@@ -67,6 +67,14 @@ class SwitchableSink:
         self.written.append((kind, payload["uid"]))
 
 
+def kinds(sink):
+    """Number of delivered events per kind."""
+    out = {}
+    for kind, _ in sink.written:
+        out[kind] = out.get(kind, 0) + 1
+    return out
+
+
 def run_until(predicate, timeout=20.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -98,12 +106,13 @@ def test_counts_and_queues_events(parts):
     writer.start()
     svc.start()
     assert run_until(lambda: script.done)
-    assert run_until(lambda: len(sink.written) == 15)
+    assert run_until(lambda: kinds(sink).get("anode_shadow") == 3)
     svc.stop()
     writer.stop()
-    kinds = [k for k, _ in sink.written]
-    assert kinds.count("hole") == 12 and kinds.count("anode") == 3
+    # counted: 12 holes, 3 anodes (modulo); comparison: 3 structural anodes
+    assert kinds(sink) == {"hole": 12, "anode": 3, "anode_shadow": 3}
     assert svc.stats()["anode_count"] == 3
+    assert svc.health()["counting"]["shadow_grouping"]["status"] == {"CONFIRMED": 3}
 
 
 def test_pipeline_exception_restarts_instead_of_killing_counter(parts):
@@ -114,7 +123,7 @@ def test_pipeline_exception_restarts_instead_of_killing_counter(parts):
     writer.start()
     svc.start()
     assert run_until(lambda: script.done)
-    assert run_until(lambda: len(sink.written) == 15)
+    assert run_until(lambda: kinds(sink).get("anode") == 3 and kinds(sink).get("hole") == 12)
     assert svc.loop_restarts == 1
     assert svc.is_running()
     assert "CUDA error" in (svc.last_error or "")
@@ -133,7 +142,7 @@ def test_sql_outage_does_not_block_counting_and_loses_nothing(parts):
     assert run_until(lambda: script.done)       # counting kept going during the outage
     assert svc.stats()["anode_count"] == 3
     assert sink.written == []
-    assert outbox.backlog() == 15
+    assert outbox.backlog() == 18                 # 12 holes, 3 anodes, 3 comparison anodes
     health = svc.health()
     assert health["status"] == "degraded"
     assert health["sql"]["consecutive_failures"] > 0
@@ -141,7 +150,7 @@ def test_sql_outage_does_not_block_counting_and_loses_nothing(parts):
     sink.healthy = True                         # database comes back
     assert run_until(lambda: outbox.backlog() == 0)
     uids = [u for _, u in sink.written]
-    assert len(uids) == 15 and len(set(uids)) == 15
+    assert len(uids) == 18 and len(set(uids)) == 18
     svc.stop()
     writer.stop()
 
@@ -217,7 +226,7 @@ def test_totals_roll_over_at_plant_midnight(parts):
 
     before, after = outbox.count_by_date("2026-10-30"), outbox.count_by_date("2026-10-31")
     assert before == {"hole": 3}                      # 23:59:45.5, :50.5, :55.5
-    assert after == {"hole": 9, "anode": 3}           # from 00:00:00.5 onwards
+    assert after == {"hole": 9, "anode": 3, "anode_shadow": 3}   # from 00:00:00.5 onwards
     stats = svc.stats()
     assert stats["date"] == "2026-10-31"
     assert (stats["hole_count"], stats["anode_count"]) == (9, 3)

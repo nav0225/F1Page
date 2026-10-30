@@ -77,3 +77,12 @@ def test_legacy_counting_mode_selectable():
     assert s.count_evidence == "frame" and s.conf_thres == 0.35
     with pytest.raises(ConfigError, match="COUNT_EVIDENCE"):
         load_settings(dict(BASE, COUNT_EVIDENCE="maybe"))
+
+
+def test_anode_grouping_settings():
+    s = load_settings(BASE)
+    assert s.anode_grouping == "modulo" and s.hole_spacing_px is None and s.anode_gap_slots == 1
+    s = load_settings(dict(BASE, ANODE_GROUPING="structural", HOLE_SPACING_PX="64.9", HOLE_SPACING_2_PX="108.5"))
+    assert s.anode_grouping == "structural" and (s.hole_spacing_px, s.hole_spacing_2_px) == (64.9, 108.5)
+    with pytest.raises(ConfigError, match="ANODE_GROUPING"):
+        load_settings(dict(BASE, ANODE_GROUPING="every4th"))

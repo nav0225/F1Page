@@ -59,8 +59,7 @@ def run_new(frames, line_y, direction, stale_frames=60):
     for frame_id, dets in enumerate(frames, start=1):
         for h in counter.update(frame_id, dets):
             holes.append((h.seq, h.track_id, h.frame_id))
-            g = grouper.add(h)
-            if g is not None:
+            for g in grouper.add(h):
                 anodes.append((g.seq, g.hole_start, g.hole_end, h.frame_id))
     return holes, anodes
 
@@ -138,9 +137,7 @@ def test_modulo_grouping_shifts_after_one_missed_hole():
     groups = []
     for i, dets in enumerate(frames, start=1):
         for h in counter.update(i, dets):
-            g = grouper.add(h)
-            if g:
-                groups.append(g)
+            groups += grouper.add(h)
     # 11 holes seen -> 2 anodes reported, and the second "anode" mixes holes
     # from physical anodes 2 and 3.
     assert counter.hole_count == 11

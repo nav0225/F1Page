@@ -20,7 +20,8 @@ substitute for real fume footage.
 Outputs in --out:
     holes.csv     one row per counted hole crossing
     rejected.csv  crossings without enough confident detections (not counted)
-    anodes.csv    one row per anode emitted by the grouper
+    anodes.csv    one row per counted anode (ANODE_GROUPING)
+    anodes_shadow.csv  anodes from the other grouping method, for comparison
     summary.json  totals, settings used and per-stage timing percentiles
     annotated.mp4 (only with --save-video)
 """
@@ -36,9 +37,8 @@ import cv2
 from dotenv import dotenv_values
 
 from config import load_settings
-from counting import ModuloGrouper
 from overlay import draw_overlay
-from pipeline import FrameProcessor, build_counter
+from pipeline import FrameProcessor, build_counter, build_groupers
 
 
 def percentiles(values, ps=(50, 95, 99)):
@@ -77,6 +77,8 @@ def build_settings(args):
         overrides["count_min_conf"] = args.count_min_conf
     if getattr(args, "min_hits", None) is not None:
         overrides["count_min_hits"] = args.min_hits
+    if getattr(args, "grouping", None):
+        overrides["anode_grouping"] = args.grouping
     return dataclasses.replace(settings, **overrides)
 
 
@@ -110,8 +112,8 @@ def run(args, detector_factory=None):
         detector = detector_factory(settings)
 
     counter = build_counter(settings)
-    grouper = ModuloGrouper(settings.holes_per_anode)
-    processor = FrameProcessor(detector, counter, grouper)
+    grouper, shadow = build_groupers(settings)
+    processor = FrameProcessor(detector, counter, grouper, shadow)
     haze = parse_haze(getattr(args, "haze", None))
     hazed_frames = 0
 
@@ -127,7 +129,15 @@ def run(args, detector_factory=None):
         writer = cv2.VideoWriter(os.path.join(args.out, "annotated.mp4"),
                                  cv2.VideoWriter_fourcc(*"mp4v"), fps or 20.0, (width, height))
 
-    hole_rows, anode_rows, rejected_rows = [], [], []
+    hole_rows, anode_rows, rejected_rows, shadow_rows = [], [], [], []
+
+    def anode_row(g, method, frame_id, video_t):
+        return {"anode_seq": g.seq, "frame_id": frame_id, "video_time_s": video_t,
+                "hole_start": g.hole_start, "hole_end": g.hole_end,
+                "hole_track_ids": " ".join(str(h.track_id) for h in g.holes),
+                "method": method, "status": getattr(g, "status", ""), "holes_seen": len(g.holes),
+                "slots": " ".join(str(s) for s in getattr(g, "slots", ())),
+                "close_reason": getattr(g, "close_reason", "")}
     timings = {"decode": [], "detect": [], "count": [], "total": []}
     line = (settings.line_x1, settings.line_y, settings.line_x2)
     frame_id = 0
@@ -165,17 +175,19 @@ def run(args, detector_factory=None):
                                   "track_id": r.track_id, "cx": round(r.cx, 1), "cy": round(r.cy, 1),
                                   "max_conf": None if r.max_conf is None else round(r.max_conf, 4),
                                   "strong_hits": r.strong_hits, "reason": r.reason})
-        for g in result.anodes:
-            anode_rows.append({"anode_seq": g.seq, "frame_id": result.frame_id, "video_time_s": video_t,
-                               "hole_start": g.hole_start, "hole_end": g.hole_end,
-                               "hole_track_ids": " ".join(str(h.track_id) for h in g.holes)})
+        anode_rows += [anode_row(g, grouper.method, frame_id, video_t) for g in result.anodes]
+        shadow_rows += [anode_row(g, shadow.method, frame_id, video_t) for g in result.shadow_anodes]
 
         if writer is not None:
-            writer.write(draw_overlay(frame, result, counter, line, counter.hole_count, grouper.anode_count, fps))
+            writer.write(draw_overlay(frame, result, counter, line, counter.hole_count, len(anode_rows), fps))
 
     cap.release()
     if writer is not None:
         writer.release()
+    # close anodes still open at the end of the video
+    end_t = (frame_id - 1) / fps if fps else None
+    anode_rows += [anode_row(g, grouper.method, frame_id, end_t) for g in grouper.flush()]
+    shadow_rows += [anode_row(g, shadow.method, frame_id, end_t) for g in shadow.flush()]
     # let tracks still in view expire so pending crossings are resolved
     for extra in range(settings.track_stale_frames + 2):
         counter.update(frame_id + 1 + extra, [])
@@ -186,10 +198,13 @@ def run(args, detector_factory=None):
                                   "strong_hits": r.strong_hits, "reason": r.reason})
     wall_s = time.perf_counter() - wall_start
 
+    anode_fields = ["anode_seq", "frame_id", "video_time_s", "hole_start", "hole_end", "hole_track_ids",
+                    "method", "status", "holes_seen", "slots", "close_reason"]
     for name, rows, fields in (("holes.csv", hole_rows, ["hole_seq", "frame_id", "video_time_s", "track_id", "cx", "cy", "conf"]),
+                               ("anodes_shadow.csv", shadow_rows, anode_fields),
                                ("rejected.csv", rejected_rows, ["frame_id", "video_time_s", "track_id", "cx", "cy",
                                                                 "max_conf", "strong_hits", "reason"]),
-                               ("anodes.csv", anode_rows, ["anode_seq", "frame_id", "video_time_s", "hole_start", "hole_end", "hole_track_ids"])):
+                               ("anodes.csv", anode_rows, anode_fields)):
         with open(os.path.join(args.out, name), "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=fields)
             w.writeheader()
@@ -201,7 +216,14 @@ def run(args, detector_factory=None):
         "video_fps": fps,
         "resolution": [width, height],
         "holes_counted": counter.hole_count,
-        "anodes_counted": grouper.anode_count,
+        "anodes_counted": len(anode_rows),
+        "anode_grouping": settings.anode_grouping,
+        "shadow_anodes": len(shadow_rows),
+        "shadow_status": {s: sum(r["status"] == s for r in shadow_rows) for s in {r["status"] for r in shadow_rows}},
+        # learned hole spacing at the counting line: set HOLE_SPACING_PX / HOLE_SPACING_2_PX from these
+        "structural_spacing_px": next(({"d1": round(g.classifier.d1, 1), "d2": round(g.classifier.d2, 1)}
+                                       for g in (grouper, shadow)
+                                       if getattr(g, "classifier", None) is not None and g.classifier.calibrated), None),
         "crossings_rejected": len(rejected_rows),
         "crossings_outside_roi": counter.outside_roi,
         "hazed_frames": hazed_frames,
@@ -230,12 +252,15 @@ def main(argv=None):
     p.add_argument("--count-min-conf", type=float)
     p.add_argument("--min-hits", type=int)
     p.add_argument("--haze", help="synthetic visibility loss: ALPHA[,PERIOD_S,DURATION_S]")
+    p.add_argument("--grouping", choices=["modulo", "structural"], help="which grouping produces anodes.csv")
     p.add_argument("--max-frames", type=int, default=0)
     p.add_argument("--save-video", action="store_true")
     args = p.parse_args(argv)
     summary = run(args)
-    print(json.dumps({k: summary[k] for k in ("frames_processed", "holes_counted", "anodes_counted",
-                                               "crossings_rejected", "hazed_frames", "processing_fps")}, indent=2))
+    print(json.dumps({k: summary[k] for k in ("frames_processed", "holes_counted", "anodes_counted", "anode_grouping",
+                                               "shadow_anodes", "shadow_status", "structural_spacing_px",
+                                               "crossings_rejected",
+                                               "hazed_frames", "processing_fps")}, indent=2))
 
 
 if __name__ == "__main__":

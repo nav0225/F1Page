@@ -46,7 +46,7 @@ class FakeConnection:
         self.closed = True
 
 
-def make_fake_pyodbc(schema_row=(16, 1, 16, 8, 8, 1, 1, 4, 4, 1)):
+def make_fake_pyodbc(schema_row=(16, 1, 16, 8, 8, 1, 1, 4, 4, 1, 32, 1)):
     mod = types.ModuleType("pyodbc")
     mod.connections = []
 
@@ -108,7 +108,7 @@ def test_hole_insert_is_idempotent_and_reuses_connection(fake_pyodbc):
 
 
 def test_missing_migration_is_reported_clearly(monkeypatch):
-    mod = make_fake_pyodbc(schema_row=(16, 1, 16, None, None, None, 1, 4, 4, 1))
+    mod = make_fake_pyodbc(schema_row=(16, 1, 16, None, None, None, 1, 4, 4, 1, 32, 1))
     monkeypatch.setitem(sys.modules, "pyodbc", mod)
     client = make_client()
     with pytest.raises(RuntimeError, match="sql_migrations") as e:
@@ -203,3 +203,18 @@ def test_fetch_day_counts(fake_pyodbc):
     assert (holes, anodes, last.hour) == (41, 10, 13)
     sql, params = fake_pyodbc.connections[0].executed[-1]
     assert params[0] == "Camera_01" and params[1] == dt.date(2026, 10, 30)
+
+
+def test_anode_insert_carries_grouping_evidence_and_shadow_goes_to_own_table(fake_pyodbc):
+    from sql_client import SqlEventSink
+    client = make_client()
+    sink = SqlEventSink(client, "Camera_01")
+    sink.write("anode", dict(ANODE, grouping_method="STRUCTURAL", holes_seen=3, count_status="PARTIAL"))
+    sql, params = fake_pyodbc.connections[0].executed[-1]
+    assert "INSERT INTO dbo.AnodeEvents" in sql
+    assert params[7:10] == ("STRUCTURAL", 3, "PARTIAL")
+    sink.write("anode_shadow", dict(ANODE, uid="6f1c1b0e-1111-4c4c-8888-000000000009",
+                                    grouping_method="MODULO", holes_seen=4, count_status=None,
+                                    slots="", close_reason=None))
+    sql, params = fake_pyodbc.connections[0].executed[-1]
+    assert "INSERT INTO dbo.AnodeGroupingShadow" in sql and params[4] == "MODULO"

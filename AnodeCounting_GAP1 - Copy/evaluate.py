@@ -16,6 +16,7 @@ Metrics:
 
 Usage:
     python evaluate.py --replay runs/replay_video1 --truth validation/video1_ground_truth.csv
+    python evaluate.py --replay runs/replay_video1 --truth ... --anodes anodes_shadow.csv
 """
 import argparse
 import csv
@@ -61,10 +62,10 @@ def match_holes(counted, truth, tolerance):
     return matches
 
 
-def evaluate(replay_dir, truth_path, tolerance=0.5):
+def evaluate(replay_dir, truth_path, tolerance=0.5, anodes_file="anodes.csv"):
     truth_holes, _ = load_truth(truth_path)
     holes = load_csv(os.path.join(replay_dir, "holes.csv"))
-    anodes = load_csv(os.path.join(replay_dir, "anodes.csv"))
+    anodes = load_csv(os.path.join(replay_dir, anodes_file))
     counted = [(float(h["video_time_s"]), int(h["hole_seq"])) for h in holes]
 
     matches = match_holes(counted, truth_holes, tolerance)
@@ -90,7 +91,8 @@ def evaluate(replay_dir, truth_path, tolerance=0.5):
         pure += is_pure
         mixed += not is_pure
         details.append({"anode_seq": int(a["anode_seq"]), "holes": f"{a['hole_start']}-{a['hole_end']}",
-                        "physical_anodes": physical, "pure": is_pure})
+                        "physical_anodes": physical, "pure": is_pure,
+                        "status": a.get("status") or None, "slots": a.get("slots") or None})
     anode_metrics = {
         "physical_anodes_with_holes": len({a for _, a in truth_holes}),
         "emitted": len(anodes),
@@ -98,7 +100,8 @@ def evaluate(replay_dir, truth_path, tolerance=0.5):
         "mixed": mixed,
         "details": details,
     }
-    return {"replay": replay_dir, "tolerance_s": tolerance, "holes": hole_metrics, "anodes": anode_metrics}
+    return {"replay": replay_dir, "anodes_file": anodes_file, "tolerance_s": tolerance,
+            "holes": hole_metrics, "anodes": anode_metrics}
 
 
 def main(argv=None):
@@ -106,8 +109,9 @@ def main(argv=None):
     p.add_argument("--replay", required=True, help="output folder of replay.py")
     p.add_argument("--truth", required=True)
     p.add_argument("--tolerance", type=float, default=0.5, help="seconds")
+    p.add_argument("--anodes", default="anodes.csv", help="anodes.csv (counted) or anodes_shadow.csv")
     args = p.parse_args(argv)
-    print(json.dumps(evaluate(args.replay, args.truth, args.tolerance), indent=2))
+    print(json.dumps(evaluate(args.replay, args.truth, args.tolerance, args.anodes), indent=2))
 
 
 if __name__ == "__main__":
