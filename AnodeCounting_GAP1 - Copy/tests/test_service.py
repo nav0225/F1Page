@@ -334,8 +334,13 @@ T0 = datetime(2026, 10, 30, 10, 0, 0, tzinfo=timezone.utc)
 
 
 def frames_at(points):
-    """points: list of (seq, seconds after T0)"""
-    return [CapturedFrame(seq, None, 1000.0 + t, T0 + timedelta(seconds=t)) for seq, t in points]
+    """
+    points: list of (seq, seconds after T0). Capture times are placed in the
+    recent past of the real monotonic clock (which starts near 0 at boot), so
+    processing lag is never negative however long the machine has been up.
+    """
+    base = time.monotonic() - 120.0
+    return [CapturedFrame(seq, None, base + t, T0 + timedelta(seconds=t)) for seq, t in points]
 
 
 def gaps_in(outbox):
