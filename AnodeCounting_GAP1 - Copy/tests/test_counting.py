@@ -145,3 +145,90 @@ def test_modulo_grouping_shifts_after_one_missed_hole():
     # from physical anodes 2 and 3.
     assert counter.hole_count == 11
     assert len(groups) == 2
+
+
+# ----------------------------------------------------------------------------
+# Track evidence mode (D5, D13, D20)
+# ----------------------------------------------------------------------------
+def track_counter(**kw):
+    kw.setdefault("x_range", (0, 1920))
+    return LineCrossingCounter(LINE_Y, "up", min_conf=0.80, stale_frames=kw.pop("stale_frames", 10),
+                               evidence="track", min_hits=kw.pop("min_hits", 2), **kw)
+
+
+def feed(counter, frames):
+    holes, rejected = [], []
+    for i, dets in enumerate(frames, start=1):
+        holes += counter.update(i, dets)
+        rejected += counter.drain_rejected()
+    for j in range(len(frames) + 1, len(frames) + counter.stale_frames + 3):  # let tracks expire
+        holes += counter.update(j, [])
+        rejected += counter.drain_rejected()
+    return holes, rejected
+
+
+def test_confidence_dip_at_line_is_counted_in_track_mode_but_missed_in_legacy():
+    # confident far below the line, weak (fumes) while crossing and afterwards
+    seq = [det(1, 600, 0.92), det(1, 580, 0.90), det(1, 560, 0.55), det(1, 535, 0.45),
+           det(1, 515, 0.40), det(1, 495, 0.42)]
+    frames = [[d] for d in seq]
+    legacy = LineCrossingCounter(LINE_Y, "up", 0.80, 10)
+    assert sum(len(legacy.update(i, f)) for i, f in enumerate(frames, start=1)) == 0
+    holes, rejected = feed(track_counter(), frames)
+    assert len(holes) == 1 and rejected == []
+    assert holes[0].frame_id == 5            # frame in which the line was crossed
+    assert holes[0].conf == pytest.approx(0.92)
+
+
+def test_weak_track_is_rejected_not_counted():
+    frames = [[det(1, y, 0.5)] for y in (560, 540, 515, 495)]
+    holes, rejected = feed(track_counter(), frames)
+    assert holes == []
+    assert len(rejected) == 1
+    r = rejected[0]
+    assert (r.track_id, r.frame_id, r.strong_hits, r.reason) == (1, 3, 0, "LOW_CONFIDENCE")
+    assert r.max_conf == pytest.approx(0.5)
+
+
+def test_crossing_confirmed_later_keeps_crossing_frame():
+    # weak while crossing, then becomes confident above the line (e.g. fume clears)
+    seq = [det(1, 540, 0.5), det(1, 515, 0.5), det(1, 495, 0.9), det(1, 475, 0.9)]
+    c = track_counter()
+    out = [c.update(i, [d]) for i, d in enumerate(seq, start=1)]
+    assert [len(o) for o in out] == [0, 0, 0, 1]   # counted once 2 confident hits exist
+    assert out[3][0].frame_id == 2
+
+
+def test_crossing_outside_roi_never_counts():
+    c = track_counter(x_range=(400, 1000))
+    frames = [[det(1, y, 0.9, cx=1500)] for y in (540, 530, 515, 500)]
+    holes, rejected = feed(c, frames)
+    assert holes == [] and rejected == [] and c.outside_roi == 1
+
+
+def test_track_state_released_when_tracks_end():
+    c = track_counter(stale_frames=5)
+    frames = simulate(n_anodes=30, speed=8.0)
+    feed(c, frames)
+    assert c.hole_count == 120
+    assert len(c._tracks) == 0
+
+
+def test_track_mode_matches_legacy_on_clean_footage():
+    frames = simulate(n_anodes=7, speed=5.0)
+    holes, _ = feed(track_counter(), frames)
+    assert len(holes) == 28
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_track_mode_recovers_weak_crossings_without_overcounting(seed):
+    rng = random.Random(1000 + seed)
+    n = rng.randint(2, 10)
+    frames = simulate(n_anodes=n, speed=rng.uniform(3.0, 12.0), miss_prob=rng.uniform(0.0, 0.2),
+                      low_conf_prob=rng.uniform(0.2, 0.6), jitter=rng.uniform(0.0, 3.0), seed=seed,
+                      weak_after_line=rng.uniform(0.1, 0.5))
+    legacy_holes, _ = legacy_reference(frames, LINE_Y, "up", 30)
+    holes, rejected = feed(track_counter(stale_frames=30), frames)
+    assert len(holes) >= len(legacy_holes)          # never worse than the legacy gate
+    assert len(holes) <= 4 * n                      # never more holes than physically passed
+    assert len(set(h.track_id for h in holes)) == len(holes)

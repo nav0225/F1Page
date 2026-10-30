@@ -15,8 +15,9 @@ BASE = {
 def test_minimal_valid_env_uses_documented_defaults():
     s = load_settings(BASE)
     assert s.count_direction == "up"
-    assert s.conf_thres == 0.35
+    assert s.conf_thres == 0.10            # tracker gets low-confidence detections (ByteTrack design)
     assert s.count_min_conf == 0.80
+    assert s.count_evidence == "track" and s.count_min_hits == 2
     assert s.line_y == 520
     assert s.source == "rtsp"
     assert s.holes_per_anode == 4
@@ -69,3 +70,10 @@ def test_secrets_not_in_repr():
     text = repr(load_settings(BASE))
     assert "secret" not in text
     assert "'pw'" not in text
+
+
+def test_legacy_counting_mode_selectable():
+    s = load_settings(dict(BASE, COUNT_EVIDENCE="frame", CONF_THRES="0.35"))
+    assert s.count_evidence == "frame" and s.conf_thres == 0.35
+    with pytest.raises(ConfigError, match="COUNT_EVIDENCE"):
+        load_settings(dict(BASE, COUNT_EVIDENCE="maybe"))

@@ -1,0 +1,24 @@
+# Ground truth for Video1.mp4 (counting row y=520 in the 1280x720 clip, belt moving up).
+# STATUS: PROVISIONAL - derived from a model-free intensity analysis of the clip
+# (kymograph of the hole lane and of the side lanes at the counting row), not
+# from the detector being evaluated. Times are approximate (+/- 0.15 s).
+# Must be verified by a person stepping through the video before it is used to
+# accept or reject a change.
+# The clip starts mid-anode: anode 0 shows only 3 holes crossing, anode 3 only 2.
+event,video_time_s,anode
+hole,1.35,0
+hole,2.45,0
+hole,3.55,0
+boundary,4.50,
+hole,5.85,1
+hole,6.95,1
+hole,8.00,1
+hole,9.10,1
+boundary,10.15,
+hole,11.20,2
+hole,12.35,2
+hole,13.40,2
+hole,14.85,2
+boundary,16.00,
+hole,17.30,3
+hole,18.55,3

@@ -16,7 +16,9 @@ def draw_overlay(frame, result, counter, line, hole_count, anode_count, fps):
     for det in result.detections:
         if not counter.accepts(det):
             continue
-        cv2.rectangle(annotated, (int(det.x1), int(det.y1)), (int(det.x2), int(det.y2)), (255, 0, 0), 2)
+        # blue: confident detection; grey: weak detection used only to follow the track
+        color = (255, 0, 0) if counter.is_strong(det) else (160, 160, 160)
+        cv2.rectangle(annotated, (int(det.x1), int(det.y1)), (int(det.x2), int(det.y2)), color, 2)
         cv2.putText(annotated, f"ID:{det.track_id}", (int(det.x1), int(det.y1) - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
