@@ -305,16 +305,27 @@ class ModuloGrouper:
     missed or extra hole shifts every later group.
     """
 
+    method = "MODULO"
+
     def __init__(self, holes_per_anode: int = 4):
         self.holes_per_anode = holes_per_anode
         self.anode_count = 0
         self._pending = []
 
-    def add(self, hole: HoleCrossing) -> Optional[AnodeGroup]:
+    def observe(self, frame_id: int, detections) -> None:
+        """Same interface as StructuralGrouper; the modulo rule needs no geometry."""
+
+    def reset_tracks(self) -> None:
+        pass
+
+    def flush(self) -> list:
+        return []
+
+    def add(self, hole: HoleCrossing) -> list:
         self._pending.append(hole)
         if len(self._pending) < self.holes_per_anode:
-            return None
+            return []
         self.anode_count += 1
         group = AnodeGroup(self.anode_count, tuple(self._pending))
         self._pending = []
-        return group
+        return [group]

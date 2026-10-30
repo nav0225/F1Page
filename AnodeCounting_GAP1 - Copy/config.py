@@ -50,6 +50,13 @@ class Settings:
     count_direction: str = "up"
     holes_per_anode: int = 4
     track_stale_frames: int = 60
+    # Anode grouping: modulo (legacy, every Nth hole) or structural (belt geometry,
+    # grouping.py). The other method always runs alongside for comparison.
+    anode_grouping: str = "modulo"
+    anode_gap_slots: int = 1                   # empty pitches between consecutive anodes
+    hole_spacing_px: Optional[float] = None    # image distance of 1 pitch ahead of the line (learned if unset)
+    hole_spacing_2_px: Optional[float] = None  # ... of 2 pitches ahead (learned if unset)
+    lane_half_width_px: float = 80.0           # holes within this x distance are in the same lane
 
     # API / health
     api_host: str = "0.0.0.0"
@@ -132,6 +139,10 @@ def load_settings(env: Optional[Mapping[str, str]] = None, require_sql: bool = T
     if evidence not in ("track", "frame"):
         errors.append(f"COUNT_EVIDENCE={evidence!r} must be 'track' or 'frame'")
 
+    grouping = get_str("ANODE_GROUPING", defaults.anode_grouping).lower()
+    if grouping not in ("modulo", "structural"):
+        errors.append(f"ANODE_GROUPING={grouping!r} must be 'modulo' or 'structural'")
+
     source = get_str("SOURCE", defaults.source).lower()
     if source not in ("rtsp", "file"):
         errors.append(f"SOURCE={source!r} must be 'rtsp' or 'file'")
@@ -160,6 +171,11 @@ def load_settings(env: Optional[Mapping[str, str]] = None, require_sql: bool = T
         count_direction=direction or defaults.count_direction,
         holes_per_anode=get_num("HOLES_PER_ANODE", defaults.holes_per_anode, int, 1, 16),
         track_stale_frames=get_num("TRACK_STALE_FRAMES", defaults.track_stale_frames, int, 1),
+        anode_grouping=grouping if grouping in ("modulo", "structural") else defaults.anode_grouping,
+        anode_gap_slots=get_num("ANODE_GAP_SLOTS", defaults.anode_gap_slots, int, 1, 10),
+        hole_spacing_px=get_num("HOLE_SPACING_PX", None, float, 1.0),
+        hole_spacing_2_px=get_num("HOLE_SPACING_2_PX", None, float, 1.0),
+        lane_half_width_px=get_num("LANE_HALF_WIDTH_PX", defaults.lane_half_width_px, float, 1.0),
         api_host=get_str("API_HOST", defaults.api_host),
         api_port=get_num("API_PORT", defaults.api_port, int, 1, 65535),
         health_max_frame_age_s=get_num("HEALTH_MAX_FRAME_AGE_S", defaults.health_max_frame_age_s, float, 1.0),

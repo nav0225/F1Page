@@ -109,6 +109,8 @@ class SqlClient:
             ("dbo.HoleCrossingEvents.ProcessingLagMs", "COL_LENGTH('dbo.HoleCrossingEvents', 'ProcessingLagMs')"),
             ("dbo.AnodeEvents.ProcessingLagMs", "COL_LENGTH('dbo.AnodeEvents', 'ProcessingLagMs')"),
             ("dbo.RejectedHoleCrossings", "OBJECT_ID('dbo.RejectedHoleCrossings')"),
+            ("dbo.AnodeEvents.CountStatus", "COL_LENGTH('dbo.AnodeEvents', 'CountStatus')"),
+            ("dbo.AnodeGroupingShadow", "OBJECT_ID('dbo.AnodeGroupingShadow')"),
         ]
         cur = self._connection.cursor()
         try:
@@ -144,12 +146,27 @@ class SqlClient:
         self._execute(
             """
             INSERT INTO dbo.AnodeEvents(EventUid, AnodeTime, AnodeTimeUtc, CameraName, HoleStartNo, HoleEndNo,
-                                        ProcessingLagMs)
-            SELECT ?, ?, ?, ?, ?, ?, ?
+                                        ProcessingLagMs, GroupingMethod, HolesSeen, CountStatus)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE NOT EXISTS (SELECT 1 FROM dbo.AnodeEvents WHERE EventUid = ?)
             """,
             e["uid"], _as_datetime(e["anode_time"]), _as_datetime(e.get("anode_time_utc")), e["camera"],
             int(e["hole_start"]), int(e["hole_end"]), _as_int(e.get("lag_ms")),
+            e.get("grouping_method"), _as_int(e.get("holes_seen")), e.get("count_status"),
+            e["uid"],
+        )
+
+    def insert_shadow_anode(self, e: dict):
+        self._execute(
+            """
+            INSERT INTO dbo.AnodeGroupingShadow(EventUid, AnodeTime, AnodeTimeUtc, CameraName, GroupingMethod,
+                                                HolesSeen, CountStatus, Slots, CloseReason, HoleStartNo, HoleEndNo)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM dbo.AnodeGroupingShadow WHERE EventUid = ?)
+            """,
+            e["uid"], _as_datetime(e["anode_time"]), _as_datetime(e["anode_time_utc"]), e["camera"],
+            e["grouping_method"], int(e["holes_seen"]), e.get("count_status"), e.get("slots"),
+            e.get("close_reason"), _as_int(e.get("hole_start")), _as_int(e.get("hole_end")),
             e["uid"],
         )
 
@@ -219,6 +236,7 @@ class SqlEventSink:
             "anode": (client.insert_anode_event, "anode_time"),
             "gap": (client.insert_gap, None),
             "hole_rejected": (client.insert_rejected_crossing, None),
+            "anode_shadow": (client.insert_shadow_anode, None),
         }
         self._dirty_days = set()  # local dates whose daily row must be recomputed
 
