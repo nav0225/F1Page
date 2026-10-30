@@ -44,10 +44,13 @@ def ffmpeg_capture_options(rtsp_transport: str) -> str:
 def open_rtsp(url: str, open_timeout_ms: int, read_timeout_ms: int):
     import cv2
 
-    params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, open_timeout_ms,
-              cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_timeout_ms]
+    open_prop = getattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC", None)
+    read_prop = getattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC", None)
+    if open_prop is None or read_prop is None:
+        # OpenCV without the timeout properties (older than 4.5.4): FFmpeg defaults apply
+        return cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     try:
-        return cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)
+        return cv2.VideoCapture(url, cv2.CAP_FFMPEG, [open_prop, open_timeout_ms, read_prop, read_timeout_ms])
     except TypeError:  # OpenCV older than 4.5.2: no open parameters
         return cv2.VideoCapture(url, cv2.CAP_FFMPEG)
 
