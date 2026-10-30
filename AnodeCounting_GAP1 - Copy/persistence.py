@@ -132,6 +132,16 @@ class Outbox:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) FROM outbox WHERE dead = 1").fetchone()[0]
 
+    def dates_sent_since(self, hours: float) -> list:
+        """Plant-local dates of the events delivered in the last `hours` hours."""
+        cutoff = datetime.now(timezone.utc).timestamp() - hours * 3600
+        cutoff_iso = datetime.fromtimestamp(cutoff, timezone.utc).isoformat(timespec="milliseconds")
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT local_date FROM outbox WHERE sent_utc >= ? AND local_date IS NOT NULL",
+                (cutoff_iso,)).fetchall()
+        return sorted(r[0] for r in rows)
+
     def prune_sent(self, older_than_days: int) -> int:
         cutoff = datetime.now(timezone.utc).timestamp() - older_than_days * 86400
         cutoff_iso = datetime.fromtimestamp(cutoff, timezone.utc).isoformat(timespec="milliseconds")
