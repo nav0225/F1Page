@@ -3,6 +3,7 @@ import time
 
 import pytest
 
+from capture import CapturedFrame, FrameGrabber
 from config import load_settings
 from counter_service import CounterService
 from persistence import EventWriter, Outbox
@@ -37,12 +38,22 @@ class Script:
 
 
 class EndlessSource:
+    def __init__(self, clock=None):
+        self.clock = clock
+
     def read(self):
         time.sleep(0.0005)
+        if self.clock is not None:
+            self.clock.tick()
         return True, object()
 
     def release(self):
         pass
+
+
+def file_grabber(clock=None):
+    """Every frame in order (like a video file); optional test clock ticks per frame read."""
+    return FrameGrabber(lambda: EndlessSource(clock), drop_stale=False, clock=clock)
 
 
 class SwitchableSink:
@@ -75,7 +86,7 @@ def parts(tmp_path):
 
 def make_service(parts, script):
     outbox, _, writer = parts
-    svc = CounterService(SETTINGS, outbox, writer, script.detector, EndlessSource)
+    svc = CounterService(SETTINGS, outbox, writer, script.detector, file_grabber())
     svc.RESTART_BACKOFF_S = 0.01
     return svc
 
@@ -189,24 +200,13 @@ class SteppingClock:
             self.now += self.step
 
 
-def clocked(script, clock):
-    """Detector factory whose frames advance the clock."""
-    def factory():
-        inner = script.detector()
-
-        def detect(frame):
-            clock.tick()
-            return inner(frame)
-        return detect
-    return factory
-
-
 def test_totals_roll_over_at_plant_midnight(parts):
     outbox, sink, writer = parts
     # first hole reaches the line at frame 30; holes then every 10 frames (5 s)
+    # each frame read advances the clock 0.5 s; events take the frame's capture time
     clock = SteppingClock(datetime(2026, 10, 30, 23, 59, 30, tzinfo=IST), step_s=0.5)
     script = Script(simulate(n_anodes=3, speed=6.0))
-    svc = CounterService(SETTINGS, outbox, writer, clocked(script, clock), EndlessSource,
+    svc = CounterService(SETTINGS, outbox, writer, script.detector, file_grabber(clock),
                          clock=clock, local_tz=IST)
     writer.start()
     svc.start()
@@ -216,8 +216,8 @@ def test_totals_roll_over_at_plant_midnight(parts):
     writer.stop()
 
     before, after = outbox.count_by_date("2026-10-30"), outbox.count_by_date("2026-10-31")
-    assert before == {"hole": 3}                      # 23:59:45, :50, :55
-    assert after == {"hole": 9, "anode": 3}           # from 00:00:00 onwards
+    assert before == {"hole": 3}                      # 23:59:45.5, :50.5, :55.5
+    assert after == {"hole": 9, "anode": 3}           # from 00:00:00.5 onwards
     stats = svc.stats()
     assert stats["date"] == "2026-10-31"
     assert (stats["hole_count"], stats["anode_count"]) == (9, 3)
@@ -248,7 +248,7 @@ def test_restart_keeps_todays_totals(parts, tmp_path):
     # recorded earlier today by the previous service version.
     second_writer = EventWriter(outbox, sink, min_backoff_s=0.01, idle_wait_s=0.01)
     script2 = Script(simulate(n_anodes=2, speed=6.0))
-    second = CounterService(SETTINGS, outbox, second_writer, script2.detector, EndlessSource)
+    second = CounterService(SETTINGS, outbox, second_writer, script2.detector, file_grabber())
     second.RESTART_BACKOFF_S = 0.01
     second.restore_today(lambda day: (12 + 20, 3 + 5, None))
     assert (second.stats()["hole_count"], second.stats()["anode_count"]) == (32, 8)
@@ -282,3 +282,123 @@ def test_restore_adds_undelivered_events_and_falls_back_without_sql(parts):
     svc.restore_today(sql_down)
     assert (svc.stats()["hole_count"], svc.stats()["anode_count"]) == (6, 1)
     assert svc.stats()["totals_source"] == "outbox_only"
+
+
+# ----------------------------------------------------------------------------
+# Counting gaps (D6)
+# ----------------------------------------------------------------------------
+class ScriptedRealtimeGrabber:
+    """Live-camera-like grabber that hands over pre-built frames with chosen timestamps."""
+
+    realtime = True
+
+    def __init__(self, frames, failures_at=None):
+        self.frames = list(frames)
+        self.failures_at = failures_at or {}   # frame seq -> capture failure count seen by then
+        self.failures = 0
+        self.given = 0
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def is_alive(self):
+        return True
+
+    def get(self, timeout=0.5):
+        if self.given >= len(self.frames):
+            time.sleep(0.01)
+            return None
+        f = self.frames[self.given]
+        self.given += 1
+        self.failures = self.failures_at.get(f.seq, self.failures)
+        return f
+
+    def stats(self):
+        return {"connected": True, "failures": self.failures, "frames_read": self.given,
+                "frames_dropped": 0, "reconnects": 0, "capture_fps": 20.0, "last_error": None}
+
+
+T0 = datetime(2026, 10, 30, 10, 0, 0, tzinfo=timezone.utc)
+
+
+def frames_at(points):
+    """points: list of (seq, seconds after T0)"""
+    return [CapturedFrame(seq, None, 1000.0 + t, T0 + timedelta(seconds=t)) for seq, t in points]
+
+
+def gaps_in(outbox):
+    import json, sqlite3
+    rows = sqlite3.connect(outbox.path).execute(
+        "SELECT payload FROM outbox WHERE kind='gap' ORDER BY rowid").fetchall()
+    return [json.loads(r[0]) for r in rows]
+
+
+def run_gap_scenario(parts, grabber, state_last_frame=None):
+    outbox, sink, writer = parts
+    if state_last_frame is not None:
+        outbox.set_state("last_frame_utc", state_last_frame.isoformat())
+    svc = CounterService(SETTINGS, outbox, writer, lambda: (lambda img: []), grabber, local_tz=IST)
+    svc.start()
+    assert run_until(lambda: grabber.given >= len(grabber.frames))
+    assert run_until(lambda: svc.frames_processed == len(grabber.frames))
+    svc.stop()
+    return svc, gaps_in(outbox)
+
+
+def test_regular_frames_record_no_gap(parts):
+    frames = frames_at([(i, i * 0.05) for i in range(1, 40)])
+    svc, gaps = run_gap_scenario(parts, ScriptedRealtimeGrabber(frames))
+    assert gaps == [] and svc.gaps_recorded == 0
+
+
+def test_skipped_frames_record_processing_gap(parts):
+    frames = frames_at([(1, 0.0), (2, 0.05), (40, 2.0), (41, 2.05)])   # 37 frames skipped
+    svc, gaps = run_gap_scenario(parts, ScriptedRealtimeGrabber(frames))
+    assert [g["reason"] for g in gaps] == ["PROCESSING_GAP"]
+    assert gaps[0]["duration_ms"] == 1950
+    assert gaps[0]["start_time"] == "2026-10-30T15:30:00.050000"      # local plant time (IST)
+    assert "37 frames skipped" in gaps[0]["details"]
+
+
+def test_camera_silence_records_source_stall(parts):
+    frames = frames_at([(1, 0.0), (2, 0.05), (3, 3.0)])
+    _, gaps = run_gap_scenario(parts, ScriptedRealtimeGrabber(frames))
+    assert [g["reason"] for g in gaps] == ["SOURCE_STALL"]
+
+
+def test_reconnect_records_source_disconnected(parts):
+    frames = frames_at([(1, 0.0), (2, 0.05), (3, 8.0), (4, 8.05)])
+    _, gaps = run_gap_scenario(parts, ScriptedRealtimeGrabber(frames, failures_at={3: 4}))
+    assert [g["reason"] for g in gaps] == ["SOURCE_DISCONNECTED"]
+    assert gaps[0]["duration_ms"] == 7950
+
+
+def test_service_downtime_recorded_at_next_start(parts):
+    frames = frames_at([(1, 0.0), (2, 0.05)])
+    _, gaps = run_gap_scenario(parts, ScriptedRealtimeGrabber(frames),
+                               state_last_frame=T0 - timedelta(minutes=10))
+    assert [g["reason"] for g in gaps] == ["SERVICE_DOWN"]
+    assert gaps[0]["duration_ms"] == 600_000
+    outbox = parts[0]
+    assert outbox.get_state("last_frame_utc") == (T0 + timedelta(seconds=0.05)).isoformat()
+
+
+def test_events_use_capture_time_not_processing_time(parts):
+    outbox, sink, writer = parts
+    sim_frames = simulate(n_anodes=1, speed=6.0)
+    frames = frames_at([(i + 1, i * 0.05) for i in range(len(sim_frames))])
+    script = Script(sim_frames)
+    svc = CounterService(SETTINGS, outbox, writer, script.detector, ScriptedRealtimeGrabber(frames),
+                         local_tz=IST)
+    svc.start()
+    assert run_until(lambda: svc.frames_processed == len(frames))
+    svc.stop()
+    import json, sqlite3
+    first = json.loads(sqlite3.connect(outbox.path).execute(
+        "SELECT payload FROM outbox WHERE kind='hole' ORDER BY rowid LIMIT 1").fetchone()[0])
+    # first hole crosses at simulated frame index 30 -> captured 1.5 s after T0
+    assert first["event_time_utc"] == "2026-10-30T10:00:01.500000"
+    assert first["lag_ms"] >= 0

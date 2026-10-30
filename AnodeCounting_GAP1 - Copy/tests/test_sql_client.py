@@ -46,7 +46,7 @@ class FakeConnection:
         self.closed = True
 
 
-def make_fake_pyodbc(schema_row=(16, 1, 16, 8, 8, 1)):
+def make_fake_pyodbc(schema_row=(16, 1, 16, 8, 8, 1, 1, 4, 4)):
     mod = types.ModuleType("pyodbc")
     mod.connections = []
 
@@ -108,7 +108,7 @@ def test_hole_insert_is_idempotent_and_reuses_connection(fake_pyodbc):
 
 
 def test_missing_migration_is_reported_clearly(monkeypatch):
-    mod = make_fake_pyodbc(schema_row=(16, 1, 16, None, None, None))
+    mod = make_fake_pyodbc(schema_row=(16, 1, 16, None, None, None, 1, 4, 4))
     monkeypatch.setitem(sys.modules, "pyodbc", mod)
     client = make_client()
     with pytest.raises(RuntimeError, match="sql_migrations") as e:
