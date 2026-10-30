@@ -106,6 +106,7 @@ class CounterService:
         self._lags_ms = deque(maxlen=600)   # capture -> processed, recent frames
         self._frame_times = {}              # recent frame seq -> capture UTC (crossing times)
         self._prev = None                   # last processed frame: (utc, mono, capture failures, restarts)
+        self._last_frame_utc = None         # capture time of the last processed frame (any source)
         self._down_since = None             # last frame time from the previous run (SERVICE_DOWN gap)
         self._last_state_save = 0.0
 
@@ -158,8 +159,8 @@ class CounterService:
         if self._thread is not None:
             self._thread.join(timeout)
         self.grabber.stop()
-        if self._prev is not None:
-            low = self.visibility.close(self._prev[0])
+        if self._last_frame_utc is not None:
+            low = self.visibility.close(self._last_frame_utc)
             if low is not None:
                 self._record_gap(low.start_utc, low.end_utc, "LOW_VISIBILITY", "open at service stop")
         self._save_state(force=True)
@@ -212,6 +213,7 @@ class CounterService:
                 for seq in sorted(self._frame_times)[:512]:
                     del self._frame_times[seq]
             result = processor.process(frame.seq, frame.image)
+            self._last_frame_utc = frame.t_capture_utc
             low = self.visibility.update(frame.image, result.detections, frame.t_capture_mono, frame.t_capture_utc)
             if low is not None:
                 self._record_gap(low.start_utc, low.end_utc, "LOW_VISIBILITY",
