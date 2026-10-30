@@ -108,6 +108,7 @@ class SqlClient:
             ("dbo.CountingGaps", "OBJECT_ID('dbo.CountingGaps')"),
             ("dbo.HoleCrossingEvents.ProcessingLagMs", "COL_LENGTH('dbo.HoleCrossingEvents', 'ProcessingLagMs')"),
             ("dbo.AnodeEvents.ProcessingLagMs", "COL_LENGTH('dbo.AnodeEvents', 'ProcessingLagMs')"),
+            ("dbo.RejectedHoleCrossings", "OBJECT_ID('dbo.RejectedHoleCrossings')"),
         ]
         cur = self._connection.cursor()
         try:
@@ -149,6 +150,22 @@ class SqlClient:
             """,
             e["uid"], _as_datetime(e["anode_time"]), _as_datetime(e.get("anode_time_utc")), e["camera"],
             int(e["hole_start"]), int(e["hole_end"]), _as_int(e.get("lag_ms")),
+            e["uid"],
+        )
+
+    def insert_rejected_crossing(self, e: dict):
+        self._execute(
+            """
+            INSERT INTO dbo.RejectedHoleCrossings(EventUid, EventTime, EventTimeUtc, CameraName, TrackId, Cx, Cy,
+                                                  MaxConfidence, StrongHits, Reason, FrameId)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM dbo.RejectedHoleCrossings WHERE EventUid = ?)
+            """,
+            e["uid"], _as_datetime(e["event_time"]), _as_datetime(e["event_time_utc"]), e["camera"],
+            int(e["track_id"]), float(e["cx"]), float(e["cy"]),
+            None if e.get("max_conf") is None else float(e["max_conf"]),
+            int(e["strong_hits"]), e["reason"],
+            None if e.get("frame_id") is None else int(e["frame_id"]),
             e["uid"],
         )
 
@@ -201,6 +218,7 @@ class SqlEventSink:
             "hole": (client.insert_hole_event, "event_time"),
             "anode": (client.insert_anode_event, "anode_time"),
             "gap": (client.insert_gap, None),
+            "hole_rejected": (client.insert_rejected_crossing, None),
         }
         self._dirty_days = set()  # local dates whose daily row must be recomputed
 

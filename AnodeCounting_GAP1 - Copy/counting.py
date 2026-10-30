@@ -41,10 +41,22 @@ class HoleCrossing:
     """A hole whose track crossed the counting line."""
     seq: int  # running hole number assigned by the counter
     track_id: int
+    frame_id: int  # frame in which the line was crossed
+    cx: float
+    cy: float
+    conf: Optional[float]  # 'frame' evidence: confidence at crossing; 'track': best confidence of the track
+
+
+@dataclass(frozen=True)
+class RejectedCrossing:
+    """A track that crossed the line but never had enough confident detections to be counted."""
+    track_id: int
     frame_id: int
     cx: float
     cy: float
-    conf: Optional[float]
+    max_conf: Optional[float]
+    strong_hits: int
+    reason: str = "LOW_CONFIDENCE"
 
 
 @dataclass(frozen=True)
@@ -72,30 +84,74 @@ def crossed(prev_y: float, curr_y: float, line_y: float, direction: str) -> bool
     return prev_y > line_y >= curr_y
 
 
+@dataclass
+class _TrackState:
+    last_y: float
+    last_seen: int
+    max_conf: float = 0.0
+    strong_hits: int = 0
+    counted: bool = False
+    pending: Optional[tuple] = None  # (frame_id, cx, cy) where the line was crossed
+
+
 class LineCrossingCounter:
     """
     Counts each track at most once when its centre crosses the line.
 
-    Detections below min_conf are ignored entirely (they neither move a track
-    nor count). A track is forgotten after stale_frames frames without an
-    accepted detection, but its id stays in the counted set so it can never
-    be counted twice.
+    Two evidence modes:
+
+    'frame' (legacy behaviour): detections below min_conf are ignored
+        entirely, so a crossing only counts if confident detections exist on
+        both sides of the line. A hole whose confidence dips while crossing
+        (fumes, partial occlusion) is missed.
+
+    'track': every tracked detection moves the track, and a crossing counts
+        once the track has min_hits detections at or above min_conf at any
+        point of its life. Crossings that never reach that evidence are
+        reported as RejectedCrossing (see drain_rejected) instead of silently
+        disappearing. Crossings outside x_range do not count. Per-track state
+        is released when the track ends. Holes are numbered in the order they
+        crossed the line: a qualified crossing is held while a track that
+        crossed earlier is still pending (at most stale_frames frames).
+
+    A track is forgotten after stale_frames frames without a detection. Keep
+    stale_frames above the tracker's own buffer (ByteTrack: 30) so a track id
+    is never revived after the counter forgot it.
     """
 
     def __init__(self, line_y: float, direction: str, min_conf: float = 0.80,
-                 stale_frames: int = 60):
+                 stale_frames: int = 60, evidence: str = "frame", min_hits: int = 2,
+                 x_range: Optional[tuple] = None):
         if direction not in ("up", "down"):
             raise ValueError("direction must be 'up' or 'down'")
+        if evidence not in ("frame", "track"):
+            raise ValueError("evidence must be 'frame' or 'track'")
         self.line_y = line_y
         self.direction = direction
         self.min_conf = min_conf
         self.stale_frames = stale_frames
+        self.evidence = evidence
+        self.min_hits = min_hits
+        self.x_range = x_range
         self.hole_count = 0
+        self.outside_roi = 0
+        self.rejected_count = 0
+        # 'frame' mode state
         self._last_y = {}      # track_id -> last centre y
         self._last_seen = {}   # track_id -> last frame_id
         self._counted = set()  # track_ids already counted
+        # 'track' mode state
+        self._tracks = {}      # track_id -> _TrackState
+        self._rejected = []
+        self._ready = []       # qualified crossings not yet numbered: (frame, track_id, cx, cy, conf)
 
     def accepts(self, det: Detection) -> bool:
+        """Whether the detection is used for counting at all."""
+        if self.evidence == "track":
+            return True
+        return det.conf is not None and det.conf >= self.min_conf
+
+    def is_strong(self, det: Detection) -> bool:
         return det.conf is not None and det.conf >= self.min_conf
 
     def reset_tracks(self) -> None:
@@ -107,8 +163,18 @@ class LineCrossingCounter:
         self._last_y.clear()
         self._last_seen.clear()
         self._counted.clear()
+        self._tracks.clear()
+
+    def drain_rejected(self) -> list:
+        rejected, self._rejected = self._rejected, []
+        return rejected
 
     def update(self, frame_id: int, detections: Iterable[Detection]) -> list:
+        if self.evidence == "track":
+            return self._update_track(frame_id, detections)
+        return self._update_frame(frame_id, detections)
+
+    def _update_frame(self, frame_id, detections):
         crossings = []
         for det in detections:
             if not self.accepts(det):
@@ -128,6 +194,60 @@ class LineCrossingCounter:
         for tid in stale:
             self._last_seen.pop(tid, None)
             self._last_y.pop(tid, None)
+            # NOTE: keep tid in _counted to avoid recount if it reappears.
+        return crossings
+
+    def _update_track(self, frame_id, detections):
+        for det in detections:
+            cy = det.cy
+            st = self._tracks.get(det.track_id)
+            if st is None:
+                st = self._tracks[det.track_id] = _TrackState(last_y=cy, last_seen=frame_id)
+            prev_y = st.last_y
+            st.last_y = cy
+            st.last_seen = frame_id
+            if det.conf is not None:
+                st.max_conf = max(st.max_conf, det.conf)
+                if det.conf >= self.min_conf:
+                    st.strong_hits += 1
+
+            if not st.counted and st.pending is None and crossed(prev_y, cy, self.line_y, self.direction):
+                if self.x_range is not None and not (self.x_range[0] <= det.cx <= self.x_range[1]):
+                    st.counted = True  # crossed outside the counting zone; never count this track
+                    self.outside_roi += 1
+                else:
+                    st.pending = (frame_id, det.cx, cy)
+
+            if st.pending is not None and not st.counted and st.strong_hits >= self.min_hits:
+                crossing_frame, cx, crossing_y = st.pending
+                st.counted = True
+                self._ready.append((crossing_frame, det.track_id, cx, crossing_y, st.max_conf))
+
+        for tid in [t for t, st in self._tracks.items() if frame_id - st.last_seen > self.stale_frames]:
+            st = self._tracks.pop(tid)
+            if st.pending is not None and not st.counted:
+                self.rejected_count += 1
+                self._rejected.append(RejectedCrossing(tid, st.pending[0], st.pending[1], st.pending[2],
+                                                       st.max_conf or None, st.strong_hits))
+        return self._release()
+
+    def _release(self):
+        """
+        Number qualified crossings in the order they crossed the line. Evidence
+        can complete in a different order (a track that crossed first may reach
+        min_hits only after the next hole has qualified); numbering by crossing
+        keeps hole numbers, and the anode grouping built on them, in belt order.
+        """
+        if not self._ready:
+            return []
+        waiting = [st.pending[0] for st in self._tracks.values() if st.pending is not None and not st.counted]
+        limit = min(waiting) if waiting else None
+        self._ready.sort()
+        crossings = []
+        while self._ready and (limit is None or self._ready[0][0] <= limit):
+            frame_id, tid, cx, cy, conf = self._ready.pop(0)
+            self.hole_count += 1
+            crossings.append(HoleCrossing(self.hole_count, tid, frame_id, cx, cy, conf))
         return crossings
 
 
