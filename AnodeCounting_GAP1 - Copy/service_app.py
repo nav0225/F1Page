@@ -17,6 +17,7 @@ from api import create_app
 from capture import FrameGrabber, ffmpeg_capture_options, open_file, open_rtsp
 from config import load_settings
 from counter_service import CounterService
+from instance_lock import InstanceLock
 from overlay import draw_overlay
 from persistence import EventWriter, Outbox
 from sql_client import SqlClient, SqlConfig, SqlEventSink
@@ -69,7 +70,11 @@ def make_grabber():
 def encode_preview(frame, result, counter, totals, fps):
     line = (settings.line_x1, settings.line_y, settings.line_x2)
     annotated = draw_overlay(frame, result, counter, line, totals["holes"], totals["anodes"], fps)
-    ok, jpg = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    h, w = annotated.shape[:2]
+    if w > settings.preview_width:
+        annotated = cv2.resize(annotated, (settings.preview_width, h * settings.preview_width // w),
+                               interpolation=cv2.INTER_AREA)
+    ok, jpg = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), settings.preview_jpeg_quality])
     return jpg.tobytes() if ok else None
 
 
@@ -93,11 +98,15 @@ writer = EventWriter(outbox, sink, periodic=sink.refresh_dirty_days,
 service = CounterService(settings, outbox, writer, make_detector, make_grabber(), encode_preview)
 
 
-def restore_totals():
+instance_lock = InstanceLock(os.path.join(os.path.dirname(os.path.abspath(settings.outbox_path)), "counter.lock"))
+
+
+def before_start():
+    instance_lock.acquire()   # refuse to start a second counter for the same outbox/camera
     service.restore_today(lambda day: sql.fetch_day_counts(day, settings.camera_name))
 
 
-app = create_app(service, writer, before_start=restore_totals)
+app = create_app(service, writer, before_start=before_start)
 
 
 def main():

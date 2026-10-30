@@ -1,10 +1,25 @@
-
-ultralytics
-opencv-python
-numpy
-pyodbc
-python-dotenv
-fastapi
-uvicorn
-streamlit
-pandas
+# Runtime dependencies of the counter service, dashboard and tools.
+#
+# torch is NOT installed from this file: on Windows, `pip install torch` gives a
+# CPU-only build (that is what made the training notebooks fail with
+# "Invalid CUDA device=0"). Install the CUDA build for the server's driver
+# first, e.g.:
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# then:
+#     pip install -r requirements.txt
+# After a successful install and replay test on the server, record the exact
+# versions so the deployment can be reproduced:
+#     pip freeze > requirements.lock.txt
+#
+# Ranges: lower bounds are versions the code and tests have been run with;
+# upper bounds stop unreviewed major upgrades.
+ultralytics>=8.3.0,<9        # best.pt was trained with 8.4.11
+lap>=0.5.12                  # required by ByteTrack; Ultralytics otherwise tries to download it at runtime
+opencv-python>=4.8,<6
+numpy>=1.26,<3
+pyodbc>=5.0,<6
+python-dotenv>=1.0,<2
+fastapi>=0.100,<1
+uvicorn>=0.23,<1
+streamlit>=1.30,<2
+pandas>=2.0,<3
