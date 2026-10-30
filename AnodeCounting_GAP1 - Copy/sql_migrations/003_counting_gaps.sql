@@ -9,6 +9,7 @@ disappearing from the totals. Reasons:
   PROCESSING_GAP       frames came too far apart to track holes reliably
   PIPELINE_RESTART     counting pipeline recovered from an error
   SERVICE_DOWN         the service was not running (detected at next start)
+  LOW_VISIBILITY       fumes: contrast low and no hole detected confidently (visibility.py)
 
 ProcessingLagMs on the event tables is the time from frame capture to the
 event being recorded, i.e. how far the count was behind the belt.
