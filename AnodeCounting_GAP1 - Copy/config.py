@@ -5,6 +5,7 @@ All configuration comes from environment variables (normally a .env file).
 Settings are checked once at startup so that a typo fails loudly instead of
 silently changing how anodes are counted.
 """
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Mapping, Optional
@@ -83,6 +84,10 @@ def load_settings(env: Optional[Mapping[str, str]] = None, require_sql: bool = T
             value = cast(raw.strip())
         except ValueError:
             errors.append(f"{key}={raw!r} is not a valid {cast.__name__}")
+            return default
+        if isinstance(value, float) and not math.isfinite(value):
+            # float() accepts "nan"/"inf"; a NaN threshold makes every comparison false
+            errors.append(f"{key}={raw!r} is not a finite number")
             return default
         if (lo is not None and value < lo) or (hi is not None and value > hi):
             errors.append(f"{key}={value} must be between {lo} and {hi}")
