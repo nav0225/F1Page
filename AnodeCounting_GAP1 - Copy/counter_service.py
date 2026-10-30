@@ -20,9 +20,9 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 
-from counting import DailyTally, LineCrossingCounter, ModuloGrouper
+from counting import DailyTally, ModuloGrouper
 from persistence import new_uid
-from pipeline import FrameProcessor
+from pipeline import FrameProcessor, build_counter
 
 log = logging.getLogger("anode_counter.service")
 
@@ -59,8 +59,7 @@ class CounterService:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.local_tz = local_tz
 
-        self.counter = LineCrossingCounter(settings.line_y, settings.count_direction,
-                                           settings.count_min_conf, settings.track_stale_frames)
+        self.counter = build_counter(settings)
         self.grouper = ModuloGrouper(settings.holes_per_anode)
         self.tally = DailyTally()
         self.totals_source = "new"   # how today's totals were initialised at startup
@@ -82,6 +81,7 @@ class CounterService:
         self.gaps_recorded = 0
         self.last_gap = None
         self._lags_ms = deque(maxlen=600)   # capture -> processed, recent frames
+        self._frame_times = {}              # recent frame seq -> capture UTC (crossing times)
         self._prev = None                   # last processed frame: (utc, mono, capture failures, restarts)
         self._down_since = None             # last frame time from the previous run (SERVICE_DOWN gap)
         self._last_state_save = 0.0
@@ -178,6 +178,10 @@ class CounterService:
                 frames = 0
                 t0 = time.time()
 
+            self._frame_times[frame.seq] = frame.t_capture_utc
+            if len(self._frame_times) > 1024:
+                for seq in sorted(self._frame_times)[:512]:
+                    del self._frame_times[seq]
             result = processor.process(frame.seq, frame.image)
             lag_ms = (time.monotonic() - frame.t_capture_mono) * 1000.0
             self._lags_ms.append(lag_ms)
@@ -263,7 +267,7 @@ class CounterService:
     # Events
     # ----------------------------
     def _record_events(self, result, frame, lag_ms):
-        if not result.holes and not self._unpersisted:
+        if not result.holes and not result.rejected and not self._unpersisted:
             return
         t_utc = frame.t_capture_utc
         t_local = self.to_local(t_utc)
@@ -273,13 +277,25 @@ class CounterService:
 
         with self._lock:
             for hole in result.holes:
-                day_seq = self.tally.add_hole(day, t_local)
+                # a hole confirmed after the crossing frame keeps the crossing time
+                h_utc = self._frame_times.get(hole.frame_id, t_utc)
+                h_local = self.to_local(h_utc)
+                day_seq = self.tally.add_hole(h_local.date(), h_local)
                 self._day_seq[hole.seq] = day_seq
-                self._unpersisted.append(("hole", day, {
-                    "uid": new_uid(), "event_time": t_local.isoformat(),
-                    "event_time_utc": t_utc.replace(tzinfo=None).isoformat(), "camera": camera,
+                self._unpersisted.append(("hole", h_local.date(), {
+                    "uid": new_uid(), "event_time": h_local.isoformat(),
+                    "event_time_utc": h_utc.replace(tzinfo=None).isoformat(), "camera": camera,
                     "track_id": hole.track_id, "cx": hole.cx, "cy": hole.cy, "conf": hole.conf,
                     "frame_id": hole.frame_id, "lag_ms": lag,
+                }))
+            for rej in result.rejected:
+                r_utc = self._frame_times.get(rej.frame_id, t_utc)
+                r_local = self.to_local(r_utc)
+                self._unpersisted.append(("hole_rejected", r_local.date(), {
+                    "uid": new_uid(), "event_time": r_local.isoformat(),
+                    "event_time_utc": r_utc.replace(tzinfo=None).isoformat(), "camera": camera,
+                    "track_id": rej.track_id, "cx": rej.cx, "cy": rej.cy, "max_conf": rej.max_conf,
+                    "strong_hits": rej.strong_hits, "reason": rej.reason, "frame_id": rej.frame_id,
                 }))
             for group in result.anodes:
                 self.tally.add_anode(day, t_local)
@@ -388,6 +404,8 @@ class CounterService:
             "processing_fps": round(self.fps, 2),
             "lag_ms": {"p50": _percentile(lags, 50), "p95": _percentile(lags, 95), "max": max(lags) if lags else None},
             "pipeline_restarts": self.loop_restarts,
+            "counting": {"evidence": self.counter.evidence, "rejected_crossings": self.counter.rejected_count,
+                         "crossings_outside_roi": self.counter.outside_roi},
             "gaps_recorded": self.gaps_recorded,
             "last_gap": self.last_gap,
             "outbox_write_errors": self.persist_errors,

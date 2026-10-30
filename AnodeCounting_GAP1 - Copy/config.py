@@ -18,9 +18,11 @@ class ConfigError(ValueError):
 class Settings:
     # Model / tracker
     model_path: str = "best.pt"
-    conf_thres: float = 0.35
+    conf_thres: float = 0.10       # detector threshold for tracker input (Ultralytics tracking default)
     iou_thres: float = 0.5
     count_min_conf: float = 0.80
+    count_evidence: str = "track"  # track | frame (legacy per-frame gate)
+    count_min_hits: int = 2
     device: str = "0"
 
     # Video source
@@ -121,6 +123,10 @@ def load_settings(env: Optional[Mapping[str, str]] = None, require_sql: bool = T
         errors.append("COUNT_DIRECTION must be set to 'up' or 'down' "
                       "(up = objects move from bottom to top of the image)")
 
+    evidence = get_str("COUNT_EVIDENCE", defaults.count_evidence).lower()
+    if evidence not in ("track", "frame"):
+        errors.append(f"COUNT_EVIDENCE={evidence!r} must be 'track' or 'frame'")
+
     source = get_str("SOURCE", defaults.source).lower()
     if source not in ("rtsp", "file"):
         errors.append(f"SOURCE={source!r} must be 'rtsp' or 'file'")
@@ -130,6 +136,8 @@ def load_settings(env: Optional[Mapping[str, str]] = None, require_sql: bool = T
         conf_thres=get_num("CONF_THRES", defaults.conf_thres, float, 0.0, 1.0),
         iou_thres=get_num("IOU_THRES", defaults.iou_thres, float, 0.0, 1.0),
         count_min_conf=get_num("COUNT_MIN_CONF", defaults.count_min_conf, float, 0.0, 1.0),
+        count_evidence=evidence or defaults.count_evidence,
+        count_min_hits=get_num("COUNT_MIN_HITS", defaults.count_min_hits, int, 1, 100),
         device=get_str("DEVICE", defaults.device),
         camera_name=get_str("CAMERA_NAME", defaults.camera_name),
         source=source,
