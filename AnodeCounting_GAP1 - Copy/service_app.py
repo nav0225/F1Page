@@ -60,26 +60,11 @@ def open_source():
     return cv2.VideoCapture(settings.rtsp_url, cv2.CAP_FFMPEG)
 
 
-def encode_preview(frame, result, counter, grouper, fps):
+def encode_preview(frame, result, counter, totals, fps):
     line = (settings.line_x1, settings.line_y, settings.line_x2)
-    annotated = draw_overlay(frame, result, counter, line, counter.hole_count, grouper.anode_count, fps)
+    annotated = draw_overlay(frame, result, counter, line, totals["holes"], totals["anodes"], fps)
     ok, jpg = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
     return jpg.tobytes() if ok else None
-
-
-def make_daily_pusher(service, sql):
-    """Writes the daily totals row from the writer thread when the totals change."""
-    last = {"snapshot": None}
-
-    def push():
-        snapshot = service.daily_snapshot()
-        if snapshot == last["snapshot"]:
-            return
-        sql.upsert_daily(snapshot["date"], settings.camera_name, snapshot["hole_count"],
-                         snapshot["anode_count"], snapshot["last_event_time"])
-        last["snapshot"] = snapshot
-
-    return push
 
 
 # ----------------------------
@@ -95,11 +80,18 @@ sql = SqlClient(SqlConfig(
     password=settings.sql_pass,
     trusted=settings.sql_trusted,
 ))
-writer = EventWriter(outbox, SqlEventSink(sql), prune_days=settings.outbox_retention_days)
+sink = SqlEventSink(sql, settings.camera_name)
+# The writer recomputes the AnodeCountDaily row of every day that received events.
+writer = EventWriter(outbox, sink, periodic=sink.refresh_dirty_days,
+                     prune_days=settings.outbox_retention_days)
 service = CounterService(settings, outbox, writer, make_detector, open_source, encode_preview)
-writer.periodic = make_daily_pusher(service, sql)
 
-app = create_app(service, writer)
+
+def restore_totals():
+    service.restore_today(lambda day: sql.fetch_day_counts(day, settings.camera_name))
+
+
+app = create_app(service, writer, before_start=restore_totals)
 
 
 def main():

@@ -132,6 +132,49 @@ class LineCrossingCounter:
 
 
 # ----------------------------
+# Daily totals
+# ----------------------------
+class DailyTally:
+    """
+    Hole and anode totals per plant-local date.
+
+    Counts are keyed by the date of each event, so they roll over at midnight
+    without a reset, and can be restored at startup from stored events.
+    Hole numbers (HoleStartNo/HoleEndNo) are sequence numbers within the day.
+    """
+
+    def __init__(self, keep_days: int = 7):
+        self.keep_days = keep_days
+        self._days = {}  # date -> {"holes", "anodes", "last_event_time"}
+
+    def _day(self, day):
+        if day not in self._days:
+            self._days[day] = {"holes": 0, "anodes": 0, "last_event_time": None}
+            for old in sorted(self._days)[:-self.keep_days]:
+                del self._days[old]
+        return self._days[day]
+
+    def restore(self, day, holes: int, anodes: int, last_event_time=None) -> None:
+        self._days[day] = {"holes": holes, "anodes": anodes, "last_event_time": last_event_time}
+
+    def add_hole(self, day, when) -> int:
+        d = self._day(day)
+        d["holes"] += 1
+        d["last_event_time"] = when
+        return d["holes"]
+
+    def add_anode(self, day, when) -> int:
+        d = self._day(day)
+        d["anodes"] += 1
+        d["last_event_time"] = when
+        return d["anodes"]
+
+    def get(self, day) -> dict:
+        d = self._days.get(day)
+        return dict(d) if d else {"holes": 0, "anodes": 0, "last_event_time": None}
+
+
+# ----------------------------
 # Hole -> anode grouping
 # ----------------------------
 class ModuloGrouper:

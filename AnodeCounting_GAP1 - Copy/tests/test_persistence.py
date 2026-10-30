@@ -116,3 +116,31 @@ def test_periodic_task_failure_does_not_stop_event_delivery(tmp_path):
         time.sleep(0.01)
     writer.stop()
     assert sink.written == uids
+
+
+def test_count_by_date(tmp_path):
+    ob = Outbox(str(tmp_path / "o.sqlite3"))
+    ob.append("hole", {"uid": "a"}, local_date="2026-10-30")
+    ob.append("hole", {"uid": "b"}, local_date="2026-10-30")
+    ob.append("anode", {"uid": "c"}, local_date="2026-10-30")
+    ob.append("hole", {"uid": "d"}, local_date="2026-10-31")
+    ob.mark_sent("a")
+    assert ob.count_by_date("2026-10-30") == {"hole": 2, "anode": 1}
+    assert ob.count_by_date("2026-10-30", unsent_only=True) == {"hole": 1, "anode": 1}
+    assert ob.count_by_date("2026-11-01") == {}
+
+
+def test_outbox_file_from_previous_version_is_upgraded(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.sqlite3")
+    conn = sqlite3.connect(path)
+    conn.execute("""CREATE TABLE outbox (uid TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL,
+                    created_utc TEXT NOT NULL, sent_utc TEXT, dead INTEGER NOT NULL DEFAULT 0,
+                    attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT)""")
+    conn.execute("INSERT INTO outbox(uid, kind, payload, created_utc) VALUES ('x', 'hole', '{}', '2026-10-30')")
+    conn.commit()
+    conn.close()
+    ob = Outbox(path)
+    assert ob.backlog() == 1
+    ob.append("hole", {"uid": "y"}, local_date="2026-10-30")
+    assert ob.count_by_date("2026-10-30") == {"hole": 1}
