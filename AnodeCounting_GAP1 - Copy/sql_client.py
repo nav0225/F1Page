@@ -224,6 +224,11 @@ class SqlEventSink:
         if day is not None:
             self._dirty_days.add(day)
 
+    def mark_dirty(self, days) -> None:
+        """Dates (date or 'YYYY-MM-DD') whose daily row must be recomputed at the next refresh."""
+        for day in days:
+            self._dirty_days.add(date.fromisoformat(day) if isinstance(day, str) else day)
+
     def refresh_dirty_days(self):
         """Recompute the daily rows of every date that received events. Called periodically."""
         for day in sorted(self._dirty_days):
