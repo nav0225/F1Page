@@ -19,3 +19,6 @@ runs/
 # IDE configurations
 .vscode/
 .idea/
+
+# Test / tool outputs
+.pytest_cache/
