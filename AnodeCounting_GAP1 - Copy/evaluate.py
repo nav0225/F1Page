@@ -9,10 +9,12 @@ Ground truth CSV columns:
 
 Metrics:
     holes   one-to-one matching of counted holes to true holes within
-            --tolerance seconds: recall, precision, misses, extras, timing error.
+            --tolerance seconds (as many matches as possible, then the smallest
+            timing error): recall, precision, misses, extras, timing error.
     anodes  grouping purity: an emitted anode is 'pure' if all of its matched
-            holes belong to one physical anode, 'mixed' otherwise. Mixed anodes
-            are records that do not correspond to a real anode.
+            holes belong to one physical anode, 'mixed' if they belong to
+            several (a record that does not correspond to a real anode), and
+            'unassessed' if none of its holes matched a true hole.
 
 Usage:
     python evaluate.py --replay runs/replay_video1 --truth validation/video1_ground_truth.csv
@@ -46,20 +48,53 @@ def load_csv(path):
 
 
 def match_holes(counted, truth, tolerance):
-    """Greedy one-to-one matching by time. counted: [(time, seq)], truth: [(time, anode)]."""
-    pairs = sorted(
-        (abs(c[0] - t[0]), ci, ti)
-        for ci, c in enumerate(counted) for ti, t in enumerate(truth)
-        if abs(c[0] - t[0]) <= tolerance
-    )
-    used_c, used_t, matches = set(), set(), {}
-    for _, ci, ti in pairs:
-        if ci in used_c or ti in used_t:
-            continue
-        used_c.add(ci)
-        used_t.add(ti)
-        matches[ci] = ti
+    """
+    One-to-one matching by time. counted: [(time, seq)], truth: [(time, anode)].
+    Returns {counted index: truth index} with the most matches within
+    `tolerance`, and among those the smallest total timing error.
+
+    Events more than `tolerance` apart in time can never be matched across
+    that gap, so the timeline is split there and each part is solved exactly.
+    """
+    events = sorted([(t, 0, i) for i, (t, _) in enumerate(counted)] +
+                    [(t, 1, i) for i, (t, _) in enumerate(truth)])
+    matches, start = {}, 0
+    for k in range(1, len(events) + 1):
+        if k == len(events) or events[k][0] - events[k - 1][0] > tolerance:
+            part = events[start:k]
+            matches.update(_match_in_order([i for _, kind, i in part if kind == 0],
+                                           [i for _, kind, i in part if kind == 1],
+                                           counted, truth, tolerance))
+            start = k
     return matches
+
+
+def _match_in_order(cs, ts, counted, truth, tolerance):
+    """
+    Exact matching of two time-ordered index lists. On a time line an optimal
+    matching never needs crossing pairs, so a dynamic programme over the two
+    sequences finds it: maximise (matches, -total error).
+    """
+    n, m = len(cs), len(ts)
+    best = [[(0, 0.0)] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            options = [best[i - 1][j], best[i][j - 1]]
+            d = abs(counted[cs[i - 1]][0] - truth[ts[j - 1]][0])
+            if d <= tolerance:
+                k, e = best[i - 1][j - 1]
+                options.append((k + 1, e - d))
+            best[i][j] = max(options)
+    pairs, i, j = {}, n, m
+    while i > 0 and j > 0:
+        if best[i][j] == best[i - 1][j]:
+            i -= 1
+        elif best[i][j] == best[i][j - 1]:
+            j -= 1
+        else:
+            pairs[cs[i - 1]] = ts[j - 1]
+            i, j = i - 1, j - 1
+    return pairs
 
 
 def evaluate(replay_dir, truth_path, tolerance=0.5, anodes_file="anodes.csv"):
@@ -82,14 +117,15 @@ def evaluate(replay_dir, truth_path, tolerance=0.5, anodes_file="anodes.csv"):
     }
 
     anode_of_seq = {counted[ci][1]: truth_holes[ti][1] for ci, ti in matches.items()}
-    pure = mixed = 0
+    pure = mixed = unassessed = 0
     details = []
     for a in anodes:
         seqs = range(int(a["hole_start"]), int(a["hole_end"]) + 1)
         physical = sorted({anode_of_seq[s] for s in seqs if s in anode_of_seq})
-        is_pure = len(physical) == 1
-        pure += is_pure
-        mixed += not is_pure
+        is_pure = len(physical) == 1 if physical else None   # None: no hole matched a true hole
+        pure += is_pure is True
+        mixed += is_pure is False
+        unassessed += is_pure is None
         details.append({"anode_seq": int(a["anode_seq"]), "holes": f"{a['hole_start']}-{a['hole_end']}",
                         "physical_anodes": physical, "pure": is_pure,
                         "status": a.get("status") or None, "slots": a.get("slots") or None})
@@ -98,6 +134,7 @@ def evaluate(replay_dir, truth_path, tolerance=0.5, anodes_file="anodes.csv"):
         "emitted": len(anodes),
         "pure": pure,
         "mixed": mixed,
+        "unassessed": unassessed,
         "details": details,
     }
     return {"replay": replay_dir, "anodes_file": anodes_file, "tolerance_s": tolerance,

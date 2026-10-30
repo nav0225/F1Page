@@ -248,6 +248,7 @@ pull request that introduced the code and has a test.
 | With `SOURCE=file` a low-visibility period still open at stop was not recorded. | Last processed frame time kept for every source. | `counter_service.py` |
 | Two cameras with separate outboxes in one folder shared one lock file. | Lock file per outbox (`<OUTBOX_PATH>.lock`). | `service_app.py` |
 | The dashboard hid the anode evidence line when no anode had a status (default modulo grouping). | `NOT ASSESSED` shown. | `dashboard_app.py` |
+| Scoring: closest-pair-first matching could leave valid hole matches unused; an anode whose holes matched no true hole was scored as mixed. | Maximum matching, then least timing error; such anodes reported as `unassessed`. Scores of all earlier replays unchanged. | `evaluate.py` |
 
 ---
 
@@ -315,7 +316,7 @@ Status: **New** (added in Phase 2), **Rewritten**, **Modified**, **Unchanged**.
 | `.gitignore` | Modified | Ignored files. | Adds the local outbox folder `data/` and test caches. |
 | `README.md` | New | This document. | Explains the project, Phase 2, every file, operation and validation. |
 
-### Tests (190 in total, `python -m pytest tests`)
+### Tests (192 in total, `python -m pytest tests`)
 
 | File | Tests | What it proves |
 |---|---|---|
@@ -328,7 +329,7 @@ Status: **New** (added in Phase 2), **Rewritten**, **Modified**, **Unchanged**.
 | `tests/test_capture.py` | 9 | Frame order, bounded backlog, hiccup absorption, reconnect, open failures, all 579 frames of `Video1.mp4` decoded with the service's options; RTSP opens on OpenCV builds without timeout properties. |
 | `tests/test_visibility.py` | 7 | Clear view and empty belt OK, reduced contrast with detections not a gap, blind period becomes one gap, short blips ignored, baseline not dragged down by long fumes. |
 | `tests/test_dashboard.py` | 5 | Day queries on migrated and original schemas; page renders on both and with the service unreachable; anodes without assessment shown as NOT ASSESSED. |
-| `tests/test_evaluate.py` | 1 | Misses, extras and mixed anodes counted correctly. |
+| `tests/test_evaluate.py` | 3 | Misses, extras and mixed anodes counted correctly; matching maximises matches before timing error; anodes without matched holes reported as unassessed. |
 | `tests/test_replay.py` | 1 | Replay writes holes, anodes and summary from a video file. |
 | `tests/test_instance_lock.py` | 1 | A second process cannot start; lock released when the owner dies. |
 | `tests/sim.py`, `tests/conftest.py`, `tests/__init__.py` | - | Belt simulator (holes, anodes, misses, weak detections, flicker) and test setup. |
@@ -537,7 +538,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests
 ```
 
-190 tests; see the table in section 4 for what each file proves.
+192 tests; see the table in section 4 for what each file proves.
 
 ---
 
