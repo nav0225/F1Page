@@ -1,1 +1,3 @@
 pytest
+httpx
+streamlit>=1.30,<2
