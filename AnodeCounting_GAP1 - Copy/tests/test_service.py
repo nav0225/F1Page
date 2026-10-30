@@ -411,3 +411,28 @@ def test_events_use_capture_time_not_processing_time(parts):
     # first hole crosses at simulated frame index 30 -> captured 1.5 s after T0
     assert first["event_time_utc"] == "2026-10-30T10:00:01.500000"
     assert first["lag_ms"] >= 0
+
+
+def test_preview_is_encoded_only_while_a_viewer_is_connected(parts):
+    outbox, sink, writer = parts
+    encodes = []
+    script = Script(simulate(n_anodes=3, speed=6.0))
+    svc = CounterService(SETTINGS, outbox, writer, script.detector, file_grabber(),
+                         encode_preview=lambda *a: encodes.append(1) or b"jpeg")
+    writer.start()
+    svc.start()
+    assert run_until(lambda: svc.frames_processed > 50)
+    assert encodes == []                              # nobody watching: no encoding at all
+    svc.preview_client(+1)
+    t0 = time.time()
+    assert run_until(lambda: len(encodes) >= 3)
+    elapsed = time.time() - t0
+    svc.preview_client(-1)
+    n = len(encodes)
+    time.sleep(0.5)
+    svc.stop()
+    writer.stop()
+    assert len(encodes) <= n + 1                      # stops again when the viewer leaves
+    assert n <= SETTINGS.preview_max_fps * (elapsed + 0.5) + 2   # capped at PREVIEW_MAX_FPS
+    seq, jpeg = svc.preview_jpeg()
+    assert jpeg == b"jpeg" and seq >= 3

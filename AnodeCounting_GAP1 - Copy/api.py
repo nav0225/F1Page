@@ -20,14 +20,21 @@ def create_app(service, writer, before_start=None) -> FastAPI:
     app = FastAPI(title="Anode Counter Service", lifespan=lifespan)
 
     def mjpeg_generator():
-        while True:
-            frame = service.preview_jpeg()
-            if frame is None:
-                time.sleep(0.05)
-                continue
-            yield (b"--frame\r\n"
-                   b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-            time.sleep(0.03)
+        # Frames are only encoded while at least one viewer is connected, at
+        # PREVIEW_MAX_FPS, and each image is sent once.
+        service.preview_client(+1)
+        last_seq = -1
+        try:
+            while True:
+                seq, frame = service.preview_jpeg()
+                if frame is None or seq == last_seq:
+                    time.sleep(0.05)
+                    continue
+                last_seq = seq
+                yield (b"--frame\r\n"
+                       b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+        finally:
+            service.preview_client(-1)
 
     @app.get("/mjpeg")
     def mjpeg():
