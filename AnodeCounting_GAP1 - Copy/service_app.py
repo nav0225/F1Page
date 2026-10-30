@@ -14,6 +14,7 @@ import cv2
 from dotenv import load_dotenv
 
 from api import create_app
+from capture import FrameGrabber, ffmpeg_capture_options, open_file, open_rtsp
 from config import load_settings
 from counter_service import CounterService
 from overlay import draw_overlay
@@ -30,8 +31,9 @@ load_dotenv()
 # ----------------------------
 settings = load_settings()
 
-# Low latency hints for FFmpeg backend
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{settings.rtsp_transport}|fflags;nobuffer|flags;low_delay"
+# FFmpeg options for RTSP. "fflags;nobuffer" was removed on purpose: it made
+# FFmpeg drop the frames read while probing at every (re)connect (see capture.py).
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_capture_options(settings.rtsp_transport)
 
 
 def log_device():
@@ -52,12 +54,16 @@ def make_detector():
     return YoloTracker(settings.model_path, settings.conf_thres, settings.iou_thres, settings.device)
 
 
-def open_source():
+def make_grabber():
     if settings.source == "file":
         log.info("Using VIDEO file: %s", settings.video_path)
-        return cv2.VideoCapture(settings.video_path)
+        return FrameGrabber(lambda: open_file(settings.video_path), drop_stale=False,
+                            reconnect_max_s=settings.reconnect_max_s)
     log.info("Using RTSP stream")
-    return cv2.VideoCapture(settings.rtsp_url, cv2.CAP_FFMPEG)
+    return FrameGrabber(lambda: open_rtsp(settings.rtsp_url, settings.rtsp_open_timeout_ms,
+                                          settings.rtsp_read_timeout_ms),
+                        drop_stale=True, buffer_frames=settings.capture_buffer_frames,
+                        reconnect_max_s=settings.reconnect_max_s)
 
 
 def encode_preview(frame, result, counter, totals, fps):
@@ -84,7 +90,7 @@ sink = SqlEventSink(sql, settings.camera_name)
 # The writer recomputes the AnodeCountDaily row of every day that received events.
 writer = EventWriter(outbox, sink, periodic=sink.refresh_dirty_days,
                      prune_days=settings.outbox_retention_days)
-service = CounterService(settings, outbox, writer, make_detector, open_source, encode_preview)
+service = CounterService(settings, outbox, writer, make_detector, make_grabber(), encode_preview)
 
 
 def restore_totals():

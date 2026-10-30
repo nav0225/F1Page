@@ -30,6 +30,16 @@ class Settings:
     rtsp_url: str = field(default="", repr=False)  # may embed credentials
     video_path: str = ""
     rtsp_transport: str = "tcp"
+    rtsp_open_timeout_ms: int = 10000
+    rtsp_read_timeout_ms: int = 5000
+    reconnect_max_s: float = 30.0
+    # Frames buffered between capture and counting (absorbs short hiccups;
+    # bounds how far counting can fall behind: 10 frames = 0.5 s at 20 fps)
+    capture_buffer_frames: int = 10
+    # Longest acceptable interval between processed frames. Above it holes can
+    # pass the line unobserved, so the interval is recorded as a counting gap.
+    # Derived from Video1.mp4 belt speed; re-check at maximum belt speed.
+    max_frame_gap_ms: int = 300
 
     # Counting line
     line_y: int = 520
@@ -131,6 +141,11 @@ def load_settings(env: Optional[Mapping[str, str]] = None, require_sql: bool = T
         rtsp_url=get_str("RTSP_URL", ""),
         video_path=get_str("VIDEO_PATH", ""),
         rtsp_transport=get_str("RTSP_TRANSPORT", defaults.rtsp_transport).lower(),
+        rtsp_open_timeout_ms=get_num("RTSP_OPEN_TIMEOUT_MS", defaults.rtsp_open_timeout_ms, int, 1000),
+        rtsp_read_timeout_ms=get_num("RTSP_READ_TIMEOUT_MS", defaults.rtsp_read_timeout_ms, int, 500),
+        reconnect_max_s=get_num("RECONNECT_MAX_S", defaults.reconnect_max_s, float, 1.0),
+        capture_buffer_frames=get_num("CAPTURE_BUFFER_FRAMES", defaults.capture_buffer_frames, int, 1, 200),
+        max_frame_gap_ms=get_num("MAX_FRAME_GAP_MS", defaults.max_frame_gap_ms, int, 50),
         line_y=get_num("LINE_Y", defaults.line_y, int, 0),
         line_x1=get_num("LINE_X1", defaults.line_x1, int, 0),
         line_x2=get_num("LINE_X2", defaults.line_x2, int, 0),

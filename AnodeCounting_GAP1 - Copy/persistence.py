@@ -77,6 +77,7 @@ class Outbox:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(outbox)")}
         if "local_date" not in columns:  # outbox file created by an earlier version
             self._conn.execute("ALTER TABLE outbox ADD COLUMN local_date TEXT")
+        self._conn.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS ix_outbox_pending ON outbox(sent_utc, dead)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS ix_outbox_local_date ON outbox(local_date, kind)")
 
@@ -122,6 +123,16 @@ class Outbox:
                     self._conn.execute("UPDATE outbox SET dead = 1 WHERE uid = ?", (uid,))
                     return True
         return False
+
+    def set_state(self, key: str, value: str) -> None:
+        """Small persistent key/value store (e.g. time of the last processed frame)."""
+        with self._lock:
+            self._conn.execute("INSERT OR REPLACE INTO state(key, value) VALUES (?, ?)", (key, value))
+
+    def get_state(self, key: str) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
 
     def backlog(self) -> int:
         with self._lock:

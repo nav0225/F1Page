@@ -32,6 +32,10 @@ def _as_datetime(value):
     return datetime.fromisoformat(value)
 
 
+def _as_int(value):
+    return None if value is None else int(round(float(value)))
+
+
 def _as_date(value):
     if isinstance(value, date):
         return value
@@ -101,6 +105,9 @@ class SqlClient:
             ("dbo.HoleCrossingEvents.EventTimeUtc", "COL_LENGTH('dbo.HoleCrossingEvents', 'EventTimeUtc')"),
             ("dbo.AnodeEvents.AnodeTimeUtc", "COL_LENGTH('dbo.AnodeEvents', 'AnodeTimeUtc')"),
             ("dbo.spRefreshAnodeDaily", "OBJECT_ID('dbo.spRefreshAnodeDaily')"),
+            ("dbo.CountingGaps", "OBJECT_ID('dbo.CountingGaps')"),
+            ("dbo.HoleCrossingEvents.ProcessingLagMs", "COL_LENGTH('dbo.HoleCrossingEvents', 'ProcessingLagMs')"),
+            ("dbo.AnodeEvents.ProcessingLagMs", "COL_LENGTH('dbo.AnodeEvents', 'ProcessingLagMs')"),
         ]
         cur = self._connection.cursor()
         try:
@@ -119,26 +126,43 @@ class SqlClient:
     def insert_hole_event(self, e: dict):
         self._execute(
             """
-            INSERT INTO dbo.HoleCrossingEvents(EventUid, EventTime, EventTimeUtc, CameraName, TrackId, Cx, Cy, Confidence, FrameId)
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+            INSERT INTO dbo.HoleCrossingEvents(EventUid, EventTime, EventTimeUtc, CameraName, TrackId, Cx, Cy,
+                                               Confidence, FrameId, ProcessingLagMs)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE NOT EXISTS (SELECT 1 FROM dbo.HoleCrossingEvents WHERE EventUid = ?)
             """,
             e["uid"], _as_datetime(e["event_time"]), _as_datetime(e.get("event_time_utc")), e["camera"],
             int(e["track_id"]), float(e["cx"]), float(e["cy"]),
             None if e.get("conf") is None else float(e["conf"]),
             None if e.get("frame_id") is None else int(e["frame_id"]),
+            _as_int(e.get("lag_ms")),
             e["uid"],
         )
 
     def insert_anode_event(self, e: dict):
         self._execute(
             """
-            INSERT INTO dbo.AnodeEvents(EventUid, AnodeTime, AnodeTimeUtc, CameraName, HoleStartNo, HoleEndNo)
-            SELECT ?, ?, ?, ?, ?, ?
+            INSERT INTO dbo.AnodeEvents(EventUid, AnodeTime, AnodeTimeUtc, CameraName, HoleStartNo, HoleEndNo,
+                                        ProcessingLagMs)
+            SELECT ?, ?, ?, ?, ?, ?, ?
             WHERE NOT EXISTS (SELECT 1 FROM dbo.AnodeEvents WHERE EventUid = ?)
             """,
             e["uid"], _as_datetime(e["anode_time"]), _as_datetime(e.get("anode_time_utc")), e["camera"],
-            int(e["hole_start"]), int(e["hole_end"]),
+            int(e["hole_start"]), int(e["hole_end"]), _as_int(e.get("lag_ms")),
+            e["uid"],
+        )
+
+    def insert_gap(self, e: dict):
+        self._execute(
+            """
+            INSERT INTO dbo.CountingGaps(EventUid, CameraName, StartTime, EndTime, StartTimeUtc, EndTimeUtc,
+                                         DurationMs, Reason, Details)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM dbo.CountingGaps WHERE EventUid = ?)
+            """,
+            e["uid"], e["camera"], _as_datetime(e["start_time"]), _as_datetime(e["end_time"]),
+            _as_datetime(e["start_time_utc"]), _as_datetime(e["end_time_utc"]),
+            int(e["duration_ms"]), e["reason"], (e.get("details") or "")[:400] or None,
             e["uid"],
         )
 
@@ -172,9 +196,11 @@ class SqlEventSink:
     def __init__(self, client: SqlClient, camera_name: str):
         self.client = client
         self.camera_name = camera_name
+        # kind -> (insert function, timestamp key that decides the daily row, or None)
         self._handlers = {
             "hole": (client.insert_hole_event, "event_time"),
             "anode": (client.insert_anode_event, "anode_time"),
+            "gap": (client.insert_gap, None),
         }
         self._dirty_days = set()  # local dates whose daily row must be recomputed
 
@@ -183,7 +209,7 @@ class SqlEventSink:
         if handler is None:
             raise PermanentEventError(f"unknown event kind {kind!r}")
         try:
-            day = _as_datetime(payload[time_key]).date()
+            day = _as_datetime(payload[time_key]).date() if time_key else None
             handler(payload)
         except (KeyError, TypeError, ValueError) as e:
             raise PermanentEventError(f"malformed {kind} event: {e}") from e
@@ -195,7 +221,8 @@ class SqlEventSink:
             else:
                 self.client.close()  # force a fresh connection on the next attempt
                 raise
-        self._dirty_days.add(day)
+        if day is not None:
+            self._dirty_days.add(day)
 
     def mark_dirty(self, days) -> None:
         """Dates (date or 'YYYY-MM-DD') whose daily row must be recomputed at the next refresh."""

@@ -1,10 +1,16 @@
 """
-The counting service: reads frames, counts holes/anodes and records events.
+The counting service: takes frames from the capture thread, counts
+holes/anodes and records events.
 
-Runs in one background thread under a supervisor. Any exception (camera,
-model, disk) is logged, the pipeline is rebuilt after a short backoff, and
-counting resumes with totals intact. The thread never talks to SQL Server;
-events go to the local outbox and are delivered by the EventWriter.
+Runs in one background thread under a supervisor. Any exception (model,
+disk, unexpected data) is logged, the pipeline is rebuilt after a short
+backoff, and counting resumes with totals intact. The thread never talks to
+SQL Server; events go to the local outbox and are delivered by the
+EventWriter.
+
+Every interval in which frames were not processed often enough to count
+reliably (camera reconnect, slow processing, pipeline restart, service
+down) is recorded as a counting gap, so missed anodes are explainable.
 """
 from __future__ import annotations
 
@@ -19,6 +25,13 @@ from persistence import new_uid
 from pipeline import FrameProcessor
 
 log = logging.getLogger("anode_counter.service")
+
+
+def _percentile(values, p):
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(round(p / 100.0 * (len(ordered) - 1))))]
 
 
 class PendingEvents(deque):
@@ -46,15 +59,15 @@ class CounterService:
     # A pipeline error stays visible in /health until this many frames have
     # been processed successfully after the restart.
     CLEAR_ERROR_AFTER_FRAMES = 600
-    RESTART_BACKOFF_S = 1.0       # first wait after a pipeline failure (doubles, max 30 s)
-    RECONNECT_WAIT_S = 1.0        # wait before reopening a failed video source
+    RESTART_BACKOFF_S = 1.0          # first wait after a pipeline failure (doubles, max 30 s)
+    STATE_SAVE_EVERY_S = 5.0         # how often the last processed frame time is persisted
 
-    def __init__(self, settings, outbox, writer, detector_factory, source_factory,
+    def __init__(self, settings, outbox, writer, detector_factory, grabber,
                  encode_preview=None, clock=None, local_tz=None):
         """
-        detector_factory() -> callable(frame) -> list[Detection]
-        source_factory()   -> object with read() -> (ok, frame) and release()
-        encode_preview(frame, result, counter, totals, fps) -> JPEG bytes or None
+        detector_factory() -> callable(frame image) -> list[Detection]
+        grabber            -> capture.FrameGrabber (or compatible: start/stop/get/stats)
+        encode_preview(image, result, counter, totals, fps) -> JPEG bytes or None
         clock()            -> timezone-aware UTC datetime (default: system clock)
         local_tz           -> plant time zone (default: the server's local time zone)
         """
@@ -62,7 +75,7 @@ class CounterService:
         self.outbox = outbox
         self.writer = writer
         self.detector_factory = detector_factory
-        self.source_factory = source_factory
+        self.grabber = grabber
         self.encode_preview = encode_preview
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.local_tz = local_tz
@@ -85,9 +98,14 @@ class CounterService:
         self.frames_processed = 0
         self.fps = 0.0
         self.loop_restarts = 0
-        self.reconnects = 0
         self.last_error = None
         self.persist_errors = 0
+        self.gaps_recorded = 0
+        self.last_gap = None
+        self._lags_ms = deque(maxlen=600)   # capture -> processed, recent frames
+        self._prev = None                   # last processed frame: (utc, mono, capture failures, restarts)
+        self._down_since = None             # last frame time from the previous run (SERVICE_DOWN gap)
+        self._last_state_save = 0.0
 
     # ----------------------------
     # Time and daily totals
@@ -126,6 +144,10 @@ class CounterService:
     # Lifecycle
     # ----------------------------
     def start(self):
+        last = self.outbox.get_state("last_frame_utc")
+        if last:
+            self._down_since = datetime.fromisoformat(last)
+        self.grabber.start()
         self._thread = threading.Thread(target=self._run_supervised, name="counter", daemon=True)
         self._thread.start()
 
@@ -133,6 +155,8 @@ class CounterService:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout)
+        self.grabber.stop()
+        self._save_state(force=True)
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -157,77 +181,142 @@ class CounterService:
         detector = self.detector_factory()
         self.counter.reset_tracks()  # new tracker instance -> old track ids are meaningless
         processor = FrameProcessor(detector, self.counter, self.grouper)
-        cap = self.source_factory()
 
         t0 = time.time()
         frames = 0
         healthy_frames = 0
+        while not self._stop.is_set():
+            frame = self.grabber.get(timeout=0.5)
+            if frame is None:
+                continue  # /health reports the growing frame age
+
+            self._check_gap(frame)
+            self.frames_processed += 1
+            frames += 1
+            dt = time.time() - t0
+            if dt >= 1.0:
+                self.fps = frames / dt
+                frames = 0
+                t0 = time.time()
+
+            result = processor.process(frame.seq, frame.image)
+            lag_ms = (time.monotonic() - frame.t_capture_mono) * 1000.0
+            self._lags_ms.append(lag_ms)
+            self._record_events(result, frame, lag_ms)
+
+            jpeg = None
+            if self.encode_preview is not None:
+                totals = self.tally.get(self.local_today())
+                jpeg = self.encode_preview(frame.image, result, self.counter, totals, self.fps)
+            with self._lock:
+                if jpeg is not None:
+                    self.latest_jpeg = jpeg
+                self.last_frame_mono = time.monotonic()
+            self._save_state()
+
+            healthy_frames += 1
+            if self.last_error and healthy_frames >= self.CLEAR_ERROR_AFTER_FRAMES:
+                self.last_error = None
+
+    # ----------------------------
+    # Counting gaps
+    # ----------------------------
+    def _check_gap(self, frame):
+        # Only meaningful when capture timestamps are real time (live camera);
+        # a video file is read at whatever pace processing allows.
+        if not getattr(self.grabber, "realtime", True):
+            return
+        failures = self.grabber.stats()["failures"]
+        prev = self._prev
+        self._prev = (frame.t_capture_utc, frame.t_capture_mono, failures, self.loop_restarts, frame.seq)
+
+        if prev is None:
+            # first frame of this run: was the service down for a while?
+            if self._down_since is not None:
+                gap_ms = (frame.t_capture_utc - self._down_since).total_seconds() * 1000.0
+                if gap_ms > self.settings.max_frame_gap_ms:
+                    self._record_gap(self._down_since, frame.t_capture_utc, "SERVICE_DOWN",
+                                     "counter service was not running")
+            return
+
+        prev_utc, prev_mono, prev_failures, prev_restarts, prev_seq = prev
+        gap_ms = (frame.t_capture_mono - prev_mono) * 1000.0
+        if gap_ms <= self.settings.max_frame_gap_ms:
+            return
+        dropped = frame.seq - prev_seq - 1
+        if failures != prev_failures:
+            reason, details = "SOURCE_DISCONNECTED", f"{failures - prev_failures} capture failures"
+        elif self.loop_restarts != prev_restarts:
+            reason, details = "PIPELINE_RESTART", self.last_error or ""
+        elif dropped > 0:
+            reason, details = "PROCESSING_GAP", f"counting fell behind; {dropped} frames skipped"
+        else:
+            reason, details = "SOURCE_STALL", "camera delivered no frames"
+        self._record_gap(prev_utc, frame.t_capture_utc, reason, details)
+
+    def _record_gap(self, start_utc, end_utc, reason, details):
+        duration_ms = int((end_utc - start_utc).total_seconds() * 1000.0)
+        start_local, end_local = self.to_local(start_utc), self.to_local(end_utc)
+        self.gaps_recorded += 1
+        self.last_gap = {"reason": reason, "start": start_local.isoformat(), "duration_ms": duration_ms}
+        log.warning("Counting gap %s: %s for %.1fs (%s)", reason, start_local.isoformat(),
+                    duration_ms / 1000.0, details)
+        self._unpersisted.append(("gap", start_local.date(), {
+            "uid": new_uid(), "camera": self.settings.camera_name,
+            "start_time": start_local.isoformat(), "end_time": end_local.isoformat(),
+            "start_time_utc": start_utc.replace(tzinfo=None).isoformat(),
+            "end_time_utc": end_utc.replace(tzinfo=None).isoformat(),
+            "duration_ms": duration_ms, "reason": reason, "details": details,
+        }))
+        self._flush_unpersisted()
+
+    def _save_state(self, force=False):
+        now = time.monotonic()
+        if self._prev is None or (not force and now - self._last_state_save < self.STATE_SAVE_EVERY_S):
+            return
+        self._last_state_save = now
         try:
-            while not self._stop.is_set():
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    self.reconnects += 1
-                    log.warning("Video read failed; reconnecting (#%d)", self.reconnects)
-                    cap.release()
-                    self._stop.wait(self.RECONNECT_WAIT_S)
-                    cap = self.source_factory()
-                    continue
+            self.outbox.set_state("last_frame_utc", self._prev[0].isoformat())
+        except Exception as e:
+            log.warning("Could not save last frame time: %s", e)
 
-                self.frames_processed += 1
-                frames += 1
-                dt = time.time() - t0
-                if dt >= 1.0:
-                    self.fps = frames / dt
-                    frames = 0
-                    t0 = time.time()
-
-                result = processor.process(self.frames_processed, frame)
-                self._record_events(result)
-
-                jpeg = None
-                if self.encode_preview is not None:
-                    totals = self.tally.get(self.local_today())
-                    jpeg = self.encode_preview(frame, result, self.counter, totals, self.fps)
-                with self._lock:
-                    if jpeg is not None:
-                        self.latest_jpeg = jpeg
-                    self.last_frame_mono = time.monotonic()
-
-                healthy_frames += 1
-                if self.last_error and healthy_frames >= self.CLEAR_ERROR_AFTER_FRAMES:
-                    self.last_error = None
-        finally:
-            cap.release()
-
-    def _record_events(self, result):
+    # ----------------------------
+    # Events
+    # ----------------------------
+    def _record_events(self, result, frame, lag_ms):
         if not result.holes and not self._unpersisted:
             return
-        now_utc = self.clock()
-        now_local = self.to_local(now_utc)
-        day = now_local.date()
+        t_utc = frame.t_capture_utc
+        t_local = self.to_local(t_utc)
+        day = t_local.date()
         camera = self.settings.camera_name
+        lag = round(lag_ms, 1)
 
         with self._lock:
             for hole in result.holes:
-                day_seq = self.tally.add_hole(day, now_local)
+                day_seq = self.tally.add_hole(day, t_local)
                 self._day_seq[hole.seq] = day_seq
                 self._unpersisted.append(("hole", day, {
-                    "uid": new_uid(), "event_time": now_local.isoformat(),
-                    "event_time_utc": now_utc.replace(tzinfo=None).isoformat(), "camera": camera,
+                    "uid": new_uid(), "event_time": t_local.isoformat(),
+                    "event_time_utc": t_utc.replace(tzinfo=None).isoformat(), "camera": camera,
                     "track_id": hole.track_id, "cx": hole.cx, "cy": hole.cy, "conf": hole.conf,
-                    "frame_id": hole.frame_id,
+                    "frame_id": hole.frame_id, "lag_ms": lag,
                 }))
             for group in result.anodes:
-                self.tally.add_anode(day, now_local)
+                self.tally.add_anode(day, t_local)
                 self._unpersisted.append(("anode", day, {
-                    "uid": new_uid(), "anode_time": now_local.isoformat(),
-                    "anode_time_utc": now_utc.replace(tzinfo=None).isoformat(), "camera": camera,
+                    "uid": new_uid(), "anode_time": t_local.isoformat(),
+                    "anode_time_utc": t_utc.replace(tzinfo=None).isoformat(), "camera": camera,
                     "hole_start": self._day_seq.get(group.hole_start, group.hole_start),
                     "hole_end": self._day_seq.get(group.hole_end, group.hole_end),
+                    "lag_ms": lag,
                 }))
             for seq in [s for s in self._day_seq if s <= self.counter.hole_count - 64]:
                 del self._day_seq[seq]
 
+        self._flush_unpersisted()
+
+    def _flush_unpersisted(self):
         while self._unpersisted:
             kind, day, payload = self._unpersisted[0]
             try:
@@ -272,6 +361,8 @@ class CounterService:
         frame_age = None if last_frame is None else now - last_frame
         uptime = now - self.started_mono
         writer = self.writer.stats()
+        capture = self.grabber.stats()
+        lags = list(self._lags_ms)
         problems, status = [], "ok"
 
         def down(msg):
@@ -292,6 +383,10 @@ class CounterService:
                 down(f"no frame processed since start ({uptime:.0f}s)")
         elif frame_age > self.settings.health_max_frame_age_s:
             down(f"no frame processed for {frame_age:.0f}s")
+        if not self.grabber.is_alive():
+            down("capture thread is not running")
+        elif not capture["connected"] and capture["failures"]:
+            degraded(f"video source disconnected: {capture['last_error']}")
         if not self.writer.is_alive():
             down("SQL writer thread is not running")
         if writer["consecutive_failures"]:
@@ -315,9 +410,12 @@ class CounterService:
             "frame_age_s": None if frame_age is None else round(frame_age, 2),
             "frames_processed": self.frames_processed,
             "processing_fps": round(self.fps, 2),
+            "lag_ms": {"p50": _percentile(lags, 50), "p95": _percentile(lags, 95), "max": max(lags) if lags else None},
             "pipeline_restarts": self.loop_restarts,
-            "reconnects": self.reconnects,
+            "gaps_recorded": self.gaps_recorded,
+            "last_gap": self.last_gap,
             "outbox_write_errors": self.persist_errors,
+            "capture": capture,
             "events_lost": self._unpersisted.lost,
             "sql": writer,
         }
