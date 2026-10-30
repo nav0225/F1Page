@@ -133,7 +133,7 @@ else:
 c4.metric("Rejected crossings", "n/a" if rejected is None else rejected,
           help="Objects that crossed the line without enough confident detections; not counted.")
 
-if "CountStatus" in anodes.columns and anodes["CountStatus"].notna().any():
+if "CountStatus" in anodes.columns and not anodes.empty:   # NULL = not assessed (modulo grouping)
     st.caption("Anode evidence: " + ", ".join(
         f"{k}: {v}" for k, v in anodes["CountStatus"].fillna("NOT ASSESSED").value_counts().items()))
 if daily is not None and int(daily["AnodeCount"]) != len(anodes):

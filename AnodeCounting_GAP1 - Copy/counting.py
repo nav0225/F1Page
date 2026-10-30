@@ -110,7 +110,9 @@ class LineCrossingCounter:
         point of its life. Crossings that never reach that evidence are
         reported as RejectedCrossing (see drain_rejected) instead of silently
         disappearing. Crossings outside x_range do not count. Per-track state
-        is released when the track ends.
+        is released when the track ends. Holes are numbered in the order they
+        crossed the line: a qualified crossing is held while a track that
+        crossed earlier is still pending (at most stale_frames frames).
 
     A track is forgotten after stale_frames frames without a detection. Keep
     stale_frames above the tracker's own buffer (ByteTrack: 30) so a track id
@@ -141,6 +143,7 @@ class LineCrossingCounter:
         # 'track' mode state
         self._tracks = {}      # track_id -> _TrackState
         self._rejected = []
+        self._ready = []       # qualified crossings not yet numbered: (frame, track_id, cx, cy, conf)
 
     def accepts(self, det: Detection) -> bool:
         """Whether the detection is used for counting at all."""
@@ -195,7 +198,6 @@ class LineCrossingCounter:
         return crossings
 
     def _update_track(self, frame_id, detections):
-        crossings = []
         for det in detections:
             cy = det.cy
             st = self._tracks.get(det.track_id)
@@ -218,10 +220,8 @@ class LineCrossingCounter:
 
             if st.pending is not None and not st.counted and st.strong_hits >= self.min_hits:
                 crossing_frame, cx, crossing_y = st.pending
-                self.hole_count += 1
                 st.counted = True
-                crossings.append(HoleCrossing(self.hole_count, det.track_id, crossing_frame, cx, crossing_y,
-                                              st.max_conf))
+                self._ready.append((crossing_frame, det.track_id, cx, crossing_y, st.max_conf))
 
         for tid in [t for t, st in self._tracks.items() if frame_id - st.last_seen > self.stale_frames]:
             st = self._tracks.pop(tid)
@@ -229,6 +229,25 @@ class LineCrossingCounter:
                 self.rejected_count += 1
                 self._rejected.append(RejectedCrossing(tid, st.pending[0], st.pending[1], st.pending[2],
                                                        st.max_conf or None, st.strong_hits))
+        return self._release()
+
+    def _release(self):
+        """
+        Number qualified crossings in the order they crossed the line. Evidence
+        can complete in a different order (a track that crossed first may reach
+        min_hits only after the next hole has qualified); numbering by crossing
+        keeps hole numbers, and the anode grouping built on them, in belt order.
+        """
+        if not self._ready:
+            return []
+        waiting = [st.pending[0] for st in self._tracks.values() if st.pending is not None and not st.counted]
+        limit = min(waiting) if waiting else None
+        self._ready.sort()
+        crossings = []
+        while self._ready and (limit is None or self._ready[0][0] <= limit):
+            frame_id, tid, cx, cy, conf = self._ready.pop(0)
+            self.hole_count += 1
+            crossings.append(HoleCrossing(self.hole_count, tid, frame_id, cx, cy, conf))
         return crossings
 
 

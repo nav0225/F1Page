@@ -34,6 +34,27 @@ def _percentile(values, p):
     return ordered[min(len(ordered) - 1, int(round(p / 100.0 * (len(ordered) - 1))))]
 
 
+class PendingEvents(deque):
+    """
+    Events the local outbox could not store yet (e.g. disk full), oldest first.
+    Bounded so that a long outage cannot exhaust memory. An event pushed out
+    because the queue is full is counted in `lost` and reported in /health,
+    never dropped silently.
+    """
+
+    def __init__(self, maxlen: int):
+        super().__init__(maxlen=maxlen)
+        self.lost = 0
+
+    def append(self, item) -> None:
+        if len(self) == self.maxlen:
+            self.lost += 1
+            if self.lost in (1, 10) or self.lost % 1000 == 0:
+                log.critical("Local outbox unwritable with %d events waiting: %d events lost",
+                             self.maxlen, self.lost)
+        super().append(item)
+
+
 class CounterService:
     # A pipeline error stays visible in /health until this many frames have
     # been processed successfully after the restart.
@@ -69,7 +90,7 @@ class CounterService:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
-        self._unpersisted = deque(maxlen=100_000)  # events the outbox could not store yet
+        self._unpersisted = PendingEvents(maxlen=100_000)  # events the outbox could not store yet
 
         self.started_mono = time.monotonic()
         self.latest_jpeg = None
@@ -89,6 +110,7 @@ class CounterService:
         self._lags_ms = deque(maxlen=600)   # capture -> processed, recent frames
         self._frame_times = {}              # recent frame seq -> capture UTC (crossing times)
         self._prev = None                   # last processed frame: (utc, mono, capture failures, restarts)
+        self._last_frame_utc = None         # capture time of the last processed frame (any source)
         self._down_since = None             # last frame time from the previous run (SERVICE_DOWN gap)
         self._last_state_save = 0.0
 
@@ -141,8 +163,8 @@ class CounterService:
         if self._thread is not None:
             self._thread.join(timeout)
         self.grabber.stop()
-        if self._prev is not None:
-            low = self.visibility.close(self._prev[0])
+        if self._last_frame_utc is not None:
+            low = self.visibility.close(self._last_frame_utc)
             if low is not None:
                 self._record_gap(low.start_utc, low.end_utc, "LOW_VISIBILITY", "open at service stop")
         self._save_state(force=True)
@@ -195,6 +217,7 @@ class CounterService:
                 for seq in sorted(self._frame_times)[:512]:
                     del self._frame_times[seq]
             result = processor.process(frame.seq, frame.image)
+            self._last_frame_utc = frame.t_capture_utc
             low = self.visibility.update(frame.image, result.detections, frame.t_capture_mono, frame.t_capture_utc)
             if low is not None:
                 self._record_gap(low.start_utc, low.end_utc, "LOW_VISIBILITY",
@@ -431,6 +454,9 @@ class CounterService:
             degraded(f"{writer['dead_letters']} events could not be written to SQL (dead letters)")
         if self._unpersisted:
             degraded(f"{len(self._unpersisted)} events not yet stored in local outbox")
+        if self._unpersisted.lost:
+            degraded(f"{self._unpersisted.lost} events LOST: the local outbox could not be written "
+                     f"while {self._unpersisted.maxlen} events were waiting")
         if self.last_error:
             degraded(f"last pipeline error: {self.last_error}")
         visibility = self.visibility.status()
@@ -458,5 +484,6 @@ class CounterService:
             "last_gap": self.last_gap,
             "outbox_write_errors": self.persist_errors,
             "capture": capture,
+            "events_lost": self._unpersisted.lost,
             "sql": writer,
         }
