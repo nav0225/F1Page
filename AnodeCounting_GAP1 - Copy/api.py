@@ -6,9 +6,11 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse, JSONResponse
 
 
-def create_app(service, writer) -> FastAPI:
+def create_app(service, writer, before_start=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
+        if before_start is not None:
+            before_start()
         writer.start()
         service.start()
         yield
